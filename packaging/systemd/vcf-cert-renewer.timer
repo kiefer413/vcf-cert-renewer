@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily VCF public certificate renewal check
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1h
+Unit=vcf-cert-renewer.service
+
+[Install]
+WantedBy=timers.target

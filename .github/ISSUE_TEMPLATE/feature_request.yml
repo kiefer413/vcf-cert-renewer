@@ -1,0 +1,18 @@
+name: Feature request
+description: Propose a scoped enhancement.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: API contract and safety considerations
+      description: Explain whether the request changes the component mutation boundary.
+    validations:
+      required: true

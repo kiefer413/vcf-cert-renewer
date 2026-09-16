@@ -1,0 +1,14 @@
+[Unit]
+Description=VCF public certificate renewal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/vcf-cert-renewer
+EnvironmentFile=/etc/vcf-cert-renewer/vcf-cert-renewer.env
+ExecStart=/usr/bin/python3 -m vcf_cert_renewer renew --all --yes
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
