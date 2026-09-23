@@ -1,0 +1,38 @@
+# Copy outside the checkout and replace example values before applying.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vcf-cert-renewer
+  namespace: vcf-cert-renewer
+data:
+  VCF_URL: "https://ops.vcf.example.com"
+  VCF_TOKEN_ENDPOINT: "https://vcenter.vcf.example.com/acs/t/CUSTOMER/token"
+  SDDC_URL: "https://sddc.vcf.example.com"
+  NSX_URL: "https://nsxt.vcf.example.com"
+  VCF_VERIFY_TLS: "true"
+  NSX_VERIFY_TLS: "true"
+  SDDC_USERNAME: "svc-vcf-cert-renewer@example.com"
+  VCF_RENEW_TARGETS: "ops.vcf.example.com,sddc.vcf.example.com,vcenter.vcf.example.com,nsxt.vcf.example.com"
+  RENEW_BEFORE_DAYS: "30"
+  CSR_COUNTRY: "US"
+  CSR_STATE: "California"
+  CSR_LOCALITY: "Los Angeles"
+  CSR_ORGANIZATION: "Example Organization"
+  CSR_ORGANIZATION_UNIT: "VCF"
+  ACME_EMAIL: "admin@example.com"
+  # Staging is for a lab: renew still replaces certificates with untrusted certs.
+  # Select production or an explicit trusted ACME_SERVER before live renewal.
+  ACME_MODE: "staging"
+  DNS_PROVIDER: "rfc2136"
+  DNSUPDATE_NAMESERVER: "192.0.2.53:53"
+  DNSUPDATE_TSIG_KEY: "example-key"
+  DNSUPDATE_TSIG_ALGORITHM: "hmac-sha256."
+  PUBLIC_DNS_RESOLVERS: "1.1.1.1:53,8.8.8.8:53"
+  OUTPUT_DIR: "/data"
+  VCF_API_TOKEN_FILE: "/run/secrets/vcf_api_token"
+  SDDC_PASSWORD_FILE: "/run/secrets/sddc_password"
+  DNSUPDATE_TSIG_SECRET_FILE: "/run/secrets/dns_tsig_secret"
+  # Optional custom CA / EAB: enable both EAB fields and provide the secret file.
+  # ACME_SERVER: "https://acme.example.com/directory"
+  # ACME_EAB_KID: "example-kid"
+  # ACME_EAB_HMAC_FILE: "/run/secrets/acme_eab_hmac"

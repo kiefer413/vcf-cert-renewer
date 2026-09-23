@@ -1,0 +1,72 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vcf-cert-renewer
+  namespace: vcf-cert-renewer
+spec:
+  schedule: "0 3 * * *"
+  timeZone: "Etc/UTC"
+  # Complete the plan-first procedure in CONTAINER_DEPLOYMENT.md before enabling.
+  suspend: true
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # Do not automatically repeat a potentially partially completed mutation.
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: vcf-cert-renewer
+        spec:
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: renewer
+              image: ghcr.io/kiefer413/vcf-cert-renewer:1.3.1
+              imagePullPolicy: IfNotPresent
+              args: ["renew", "--all", "--yes"]
+              envFrom:
+                - configMapRef:
+                    name: vcf-cert-renewer
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  memory: 512Mi
+              volumeMounts:
+                - name: secrets
+                  mountPath: /run/secrets
+                  readOnly: true
+                - name: data
+                  mountPath: /data
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: secrets
+              secret:
+                secretName: vcf-cert-renewer
+                defaultMode: 0440
+            - name: data
+              persistentVolumeClaim:
+                claimName: vcf-cert-renewer-data
+            - name: tmp
+              emptyDir:
+                medium: Memory
+                sizeLimit: 64Mi

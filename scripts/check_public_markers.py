@@ -42,9 +42,12 @@ def private_markers(root: Path) -> list[bytes]:
 def unsafe_secret_assignments(data: bytes) -> bool:
     for match in SECRET_ASSIGNMENT_RE.finditer(data):
         name = match.group(1).upper()
-        if name.endswith((b"_ENDPOINT", b"_URL", b"_PATH", b"_FILE")):
+        # Kubernetes volume reference: a Secret object name, never its value.
+        if name == b"SECRETNAME" or name.endswith((b"_ENDPOINT", b"_URL", b"_PATH", b"_FILE")):
             continue
         value = match.group(2).strip().strip(b"'\"").lower()
+        if name == b"AUTOMOUNTSERVICEACCOUNTTOKEN" and value in {b"true", b"false"}:
+            continue
         if value not in SAFE_EXAMPLE_VALUES and not value.startswith(
             (b"example-", b"test-", b"dummy-", b"${", b"<")
         ):

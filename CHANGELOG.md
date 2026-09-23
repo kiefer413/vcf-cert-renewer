@@ -1,4 +1,10 @@
-# v1.2.0
+# Changelog
+
+## v1.3.1
+
+- Official Kubernetes CronJob with persistent state, mounted secrets and hardened non-root runtime.
+- Standalone Docker/Podman/Compose/Kubernetes guide with plan-first setup and safe cleanup.
+- Offline deployment validation; authentication and FULL_RENEW behavior unchanged.
 
 ## v1.3.0
 
@@ -9,6 +15,8 @@
 - Offline secret, container and release regression checks.
 - Existing VCF/NSX authentication and FULL_RENEW scope remain unchanged.
 
+## v1.2.0
+
 - Generic ACME v2 directory selection with optional EAB account registration.
 - Preserve explicit-server precedence, legacy ACME_MODE and staging defaults.
 - Validate EAB pairs early; keep credentials out of argv, repr and signing errors.
@@ -16,7 +24,6 @@
 - Verify generic certificate chains and document provider support boundaries.
 - Preserve four-target renewal scope, authentication and systemd behavior.
 
-# Changelog
 
 ## 1.1.0 - 2026-09-16
 

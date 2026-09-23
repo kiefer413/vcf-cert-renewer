@@ -32,6 +32,13 @@ class PublicReleaseTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_scanner_allows_kubernetes_secret_reference_but_not_values(self):
+        from scripts.check_public_markers import unsafe_secret_assignments
+        self.assertFalse(unsafe_secret_assignments(b"secretName: vcf-cert-renewer"))
+        self.assertFalse(unsafe_secret_assignments(b"automountServiceAccountToken: false"))
+        self.assertTrue(unsafe_secret_assignments(b"automountServiceAccountToken: live-looking-value"))
+        self.assertTrue(unsafe_secret_assignments(b"SDDC_PASSWORD: live-looking-value"))
+
     def test_scanner_recognizes_eab_secrets(self):
         from scripts.check_public_markers import unsafe_secret_assignments
         self.assertTrue(unsafe_secret_assignments(b"ACME_EAB_HMAC=live-looking-value"))

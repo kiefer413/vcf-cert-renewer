@@ -6,7 +6,7 @@ import sys
 import tarfile
 import tempfile
 
-image = sys.argv[1] if len(sys.argv) > 1 else 'vcf-cert-renewer:1.3.0'
+image = sys.argv[1] if len(sys.argv) > 1 else 'vcf-cert-renewer:1.3.1'
 marker_file = Path('.public-scan-private-markers')
 private = (b'vcf-build-context-canary',) + tuple(
     line.strip().lower() for line in marker_file.read_bytes().splitlines()

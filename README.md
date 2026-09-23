@@ -1,5 +1,13 @@
 # VCF Certificate Renewer – ACME v2 certificate automation for VMware Cloud Foundation 9.x
 
+## Docker / Podman and Kubernetes
+
+Use `ghcr.io/kiefer413/vcf-cert-renewer:1.3.1` (amd64/arm64). Python, dependencies
+and lego are included. See the **[container deployment guide](CONTAINER_DEPLOYMENT.md)**
+for Docker/Podman/Compose installation and the official
+[Kubernetes CronJob](deploy/kubernetes/cronjob.yaml), including plan-first setup
+and mounted secrets. Until v1.3.1 is published, use the available `:1.3.0` image.
+
 CA-neutral ACME v2 TLS certificate automation for VMware Cloud Foundation (VCF) 9.x.
 
 VCF Certificate Renewer discovers browser-facing certificates, builds a read-only renewal plan, requests product-generated CSRs, completes ACME DNS-01 validation, imports and applies the resulting certificate chain through the appropriate product API, and verifies the live HTTPS certificate.
@@ -270,3 +278,15 @@ See [secret handling and container deployment](docs/secret-handling.md) for `_FI
 systemd Credentials, Docker/Podman, Compose and persistent ACME account storage.
 Direct environment configuration remains supported. Container images do not
 encrypt secrets; production file storage must be protected externally.
+
+### Persistent state and CronJob logs
+
+Keep the Kubernetes PVC as the recommended default. `/data/acme` persists lego's
+ACME account private key, registration and account identity, especially important
+for custom ACME CAs/EAB. CSR/fullchain artifacts under `/data` can be regenerated;
+the account identity should be preserved. Endpoint private TLS keys stay in VCF/NSX.
+Writable `emptyDir` is technically possible if the CA permits repeated account
+registration, but Pod recreation may trigger a new registration that fails due to
+registration limits, EAB requirements or custom CA rules. CronJob renewal output
+goes to stdout/container logs (`kubectl logs`), not reports under `/data`.
+See [storage and logging details](CONTAINER_DEPLOYMENT.md).

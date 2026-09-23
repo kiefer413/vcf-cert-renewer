@@ -1,4 +1,4 @@
-# Secret handling and batch containers (v1.3.0)
+# Secret handling and batch containers (v1.3.1)
 
 Direct environment values and the existing secrets.env deployment remain supported.
 For production, use mounted files and NAME_FILE instead. The central resolver runs
@@ -85,17 +85,25 @@ batch command, with no scheduler. Schedule it externally. Do not run concurrent
 renewals against the same targets or state directory.
 
 ```sh
-docker build -t vcf-cert-renewer:1.3.0 .
-docker run --rm --network none vcf-cert-renewer:1.3.0 --version
-docker run --rm --network none vcf-cert-renewer:1.3.0 --help
+docker build -t vcf-cert-renewer:1.3.1 .
+docker run --rm --network none vcf-cert-renewer:1.3.1 --version
+docker run --rm --network none vcf-cert-renewer:1.3.1 --help
 ```
 
-`OUTPUT_DIR=/data` contains renewal artifacts and lego state under
-`/data/acme/<staging|production|custom>`, including ACME account private keys.
-Persist /data to reuse accounts (including EAB registration); back it up securely.
+`OUTPUT_DIR=/data` contains CSR/fullchain artifacts and lego state under
+`/data/acme/<staging|production|custom>`, including the ACME account private key,
+registration, account identity and issued certificate files. Persist `/data` to
+preserve that identity, especially for custom ACME CAs/EAB; back it up securely.
 Lego further scopes account storage by CA/email. No additional .lego mount is
-needed: the signer already passes an explicit --path. Protect retained CSRs,
-certificates, keys and reports and define your own retention policy.
+needed: the signer already passes an explicit --path. CSR/fullchain artifacts can
+be regenerated; the endpoint's private TLS key remains in VCF/NSX.
+
+Keep the Kubernetes PVC as the recommended default. Writable `emptyDir` is
+technically possible if the CA allows repeated account registration, but Pod
+recreation loses account state and may trigger a new registration that fails due
+to registration limits, EAB requirements or custom CA rules. CronJob renewal output
+goes to stdout/container logs (`kubectl logs`), not reports saved under `/data`.
+Protect retained ACME state and artifacts and define your own retention policy.
 
 ## Docker and Podman
 
@@ -113,12 +121,12 @@ docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
   --env-file ./container.env \
   --mount type=bind,src="$(pwd)/secrets",dst=/run/secrets,readonly \
   --mount type=volume,src=vcf-renewer-data,dst=/data \
-  ghcr.io/kiefer413/vcf-cert-renewer:1.3.0 plan --all
+  ghcr.io/kiefer413/vcf-cert-renewer:1.3.1 plan --all
 ```
 
 Use `renew --all --yes` instead of `plan --all` when ready to authorize renewal.
 Planning uses network reads; only --help/--version/configuration smoke checks are
-offline. The image will become available after the separate approved release.
+offline. The v1.3.1 image becomes available after the separately approved release; until then, use published v1.3.0.
 Docker standalone `run` has no `--secret` option: the example uses read-only mounts.
 Podman supports the same image/mount approach and native secrets, for example:
 
@@ -133,7 +141,7 @@ podman run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
   --secret sddc_password,uid=10001,gid=10001,mode=0400 \
   --secret dns_tsig_secret,uid=10001,gid=10001,mode=0400 \
   -v vcf-renewer-data:/data \
-  ghcr.io/kiefer413/vcf-cert-renewer:1.3.0 plan --all
+  ghcr.io/kiefer413/vcf-cert-renewer:1.3.1 plan --all
 ```
 
 For EAB, also mount/create acme_eab_hmac and enable both EAB settings. For private
@@ -167,9 +175,9 @@ log into GHCR or publish. A protected `ghcr-release` GitHub environment should g
 publishing; configure required reviewers before pushing a release tag.
 
 Build the test-only image with
-`docker build -t vcf-cert-renewer-test:1.3.0 - < packaging/Dockerfile.test`.
+`docker build -t vcf-cert-renewer-test:1.3.1 - < packaging/Dockerfile.test`.
 Run it with `docker run --rm --network none --read-only --tmpfs /tmp:rw,size=256m
--v "$PWD:/work:ro" vcf-cert-renewer-test:1.3.0` (one command). Use a source-only
+-v "$PWD:/work:ro" vcf-cert-renewer-test:1.3.1` (one command). Use a source-only
 checkout with no production config/state mounted. The entrypoint runs
 `scripts/validate_release.sh`; it requires --network none.
 `python scripts/container_smoke.py IMAGE` validates the runtime without API calls.

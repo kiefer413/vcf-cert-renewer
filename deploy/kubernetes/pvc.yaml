@@ -1,0 +1,12 @@
+# Requires a default StorageClass; set storageClassName if your cluster needs it.
+# Retain this claim on uninstall: it contains ACME account private keys and state.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vcf-cert-renewer-data
+  namespace: vcf-cert-renewer
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi

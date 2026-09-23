@@ -14,7 +14,7 @@ RUN set -eu; arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
 
 FROM python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
 LABEL org.opencontainers.image.title="VCF Certificate Renewer" \
-      org.opencontainers.image.version="1.3.0" \
+      org.opencontainers.image.version="1.3.1" \
       org.opencontainers.image.source="https://github.com/kiefer413/vcf-cert-renewer"
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 OUTPUT_DIR=/data
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
