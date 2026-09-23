@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -16,7 +16,7 @@ DEFAULT_CONFIG_PATH = Path("/etc/vcf-cert-renewer/config.yaml")
 DEFAULT_SECRETS_PATH = Path("/etc/vcf-cert-renewer/secrets.env")
 SECRET_ENV_NAMES = frozenset({
     "VCF_API_TOKEN", "SDDC_USERNAME", "SDDC_PASSWORD", "VCF_CLIENT_ID",
-    "VCF_CLIENT_SECRET", "DNSUPDATE_TSIG_SECRET",
+    "VCF_CLIENT_SECRET", "DNSUPDATE_TSIG_SECRET", "ACME_EAB_KID", "ACME_EAB_HMAC",
 })
 DEFAULTS: dict[str, Any] = {
     "VCF_TOKEN_ENDPOINT": "https://vcenter.vcf.example.com/acs/t/CUSTOMER/token",
@@ -143,6 +143,8 @@ class Settings:
     acme_mode: str = "staging"
     acme_server: str = ACME_DIRECTORIES["staging"]
     acme_email: str | None = None
+    acme_eab_kid: str | None = field(default=None, repr=False, kw_only=True)
+    acme_eab_hmac: str | None = field(default=None, repr=False, kw_only=True)
     dns_provider: str = "rfc2136"
     dns_nameserver: str | None = None
     dns_tsig_key: str | None = None
@@ -155,6 +157,11 @@ class Settings:
     renewal_targets: tuple[str, ...] = (
         "ops.vcf.example.com", "sddc.vcf.example.com",
         "vcenter.vcf.example.com", "nsxt.vcf.example.com")
+
+    def __post_init__(self) -> None:
+        if bool(self.acme_eab_kid) != bool(self.acme_eab_hmac):
+            raise ConfigurationError(
+                "ACME_EAB_KID and ACME_EAB_HMAC must both be set or both be empty")
 
     @classmethod
     def load(cls, *, config_path: Path | None = None,
@@ -173,6 +180,8 @@ class Settings:
             env["VCF_TOKEN_ENDPOINT"] = env["VCF_TOKEN_URL"]
         if "VCF_BASE_URL" in env and "VCF_URL" not in env:
             env["VCF_URL"] = env["VCF_BASE_URL"]
+        if "DNSUPDATE_TSIG_KEY_NAME" in env and "DNSUPDATE_TSIG_KEY" not in env:
+            env["DNSUPDATE_TSIG_KEY"] = env["DNSUPDATE_TSIG_KEY_NAME"]
         supported = (set(DEFAULTS) | set(SECRET_ENV_NAMES) |
                      {"ACME_SERVER", "ACME_EMAIL", "DNSUPDATE_NAMESERVER",
                       "DNSUPDATE_TSIG_KEY"})
@@ -237,6 +246,8 @@ class Settings:
             client_secret=value("VCF_CLIENT_SECRET"),
             acme_mode=mode, acme_server=server,
             acme_email=value("ACME_EMAIL"),
+            acme_eab_kid=str(values.get("ACME_EAB_KID") or "").strip() or None,
+            acme_eab_hmac=str(values.get("ACME_EAB_HMAC") or "").strip() or None,
             dns_provider=str(values["DNS_PROVIDER"]).strip().lower(),
             dns_nameserver=value("DNSUPDATE_NAMESERVER"),
             dns_tsig_key=value("DNSUPDATE_TSIG_KEY"),

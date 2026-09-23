@@ -32,6 +32,12 @@ class PublicReleaseTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_scanner_recognizes_eab_secrets(self):
+        from scripts.check_public_markers import unsafe_secret_assignments
+        self.assertTrue(unsafe_secret_assignments(b"ACME_EAB_HMAC=live-looking-value"))
+        self.assertTrue(unsafe_secret_assignments(b"ACME_EAB_KID=live-looking-value"))
+        self.assertFalse(unsafe_secret_assignments(b"ACME_EAB_HMAC=\nACME_EAB_KID="))
+
 
 if __name__ == "__main__":
     unittest.main()

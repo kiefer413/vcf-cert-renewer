@@ -1,6 +1,6 @@
-# VCF Certificate Renewer
+# VCF Certificate Renewer – ACME v2 certificate automation for VMware Cloud Foundation 9.x
 
-Automated public TLS certificate lifecycle management for VMware Cloud Foundation (VCF) 9.x.
+CA-neutral ACME v2 TLS certificate automation for VMware Cloud Foundation (VCF) 9.x.
 
 VCF Certificate Renewer discovers browser-facing certificates, builds a read-only renewal plan, requests product-generated CSRs, completes ACME DNS-01 validation, imports and applies the resulting certificate chain through the appropriate product API, and verifies the live HTTPS certificate.
 
@@ -212,7 +212,52 @@ Public issuance uses Let's Encrypt, or another compatible ACME directory, with `
 
 ```bash
 python3 -m compileall -q vcf_cert_renewer scripts tests
-python3 -m unittest discover -s tests -v
+python3 -m pytest -q
 python3 -m scripts.smoke_test
 python3 scripts/check_public_markers.py
 ```
+
+
+## ACME v2 providers (v1.2.0)
+
+Let's Encrypt is the default and tested provider; it is not the only option.
+Generic ACME v2 and ACME v2 with External Account Binding (EAB) are supported
+by protocol. Individual commercial/private providers are not necessarily
+individually validated. Providers must support DNS-01 and the submitted CSR;
+provider policy, names, trust distribution and certificate profiles still apply.
+
+An explicit nonempty `ACME_SERVER` overrides `ACME_MODE`:
+
+```bash
+ACME_SERVER=https://acme.example.com/directory
+ACME_EMAIL=admin@example.com
+ACME_EAB_KID=
+ACME_EAB_HMAC=
+```
+
+Without a server, legacy `ACME_MODE=production` selects
+`https://acme-v02.api.letsencrypt.org/directory`; `ACME_MODE=staging` selects
+`https://acme-staging-v02.api.letsencrypt.org/directory`. With neither configured,
+the existing **staging** default is preserved. Keep `ACME_SERVER` empty when
+switching providers through the legacy mode selector.
+
+Set both EAB values for providers requiring account binding; a partial pair is
+a configuration error before any API work. Store them in the root-only environment
+file or optional secrets file. The HMAC is passed through lego's environment,
+never its command arguments; subprocess output is suppressed on failure.
+EAB binds account registration, and does not change existing registered accounts.
+
+DNS-01/RFC2136 configuration and TSIG permissions remain unchanged for every CA.
+`DNSUPDATE_TSIG_KEY_NAME` is accepted as an alias; the existing
+`DNSUPDATE_TSIG_KEY` takes precedence if both are set.
+Chain building deduplicates returned certificates, verifies issuer/subject and
+signatures, and follows CA Issuers AIA for missing issuers up to a self-signed
+root. It contains no provider-specific root or intermediate constants. The
+result remains leaf-first and includes the root required by the VCF import flow.
+A private CA's trust anchors must already be trusted where applicable.
+
+The four FULL_RENEW targets, authentication, CLI commands, read-only discover/plan,
+and production systemd scheduling are unchanged.
+
+Offline tests: install `pytest`, then run `python3 -m pytest -q`. The suite isolates
+host configuration and rejects socket connections to protect production systems.

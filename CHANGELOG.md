@@ -1,3 +1,12 @@
+# v1.2.0
+
+- Generic ACME v2 directory selection with optional EAB account registration.
+- Preserve explicit-server precedence, legacy ACME_MODE and staging defaults.
+- Validate EAB pairs early; keep credentials out of argv, repr and signing errors.
+- Accept DNSUPDATE_TSIG_KEY_NAME without changing the existing TSIG key setting.
+- Verify generic certificate chains and document provider support boundaries.
+- Preserve four-target renewal scope, authentication and systemd behavior.
+
 # Changelog
 
 ## 1.1.0 - 2026-09-16

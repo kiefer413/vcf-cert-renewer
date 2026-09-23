@@ -46,3 +46,6 @@ in deterministic order so one target failure cannot broaden scope.
 
 See [renewal flow](renewal-flow.md), [authentication](authentication.md), and
 [security](security.md) for operational details.
+
+ACME directory selection and optional EAB are documented in the README.
+EAB credentials are environment-only inputs to lego, excluded from Settings repr.

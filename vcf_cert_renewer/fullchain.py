@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Callable
 
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 import requests
 
@@ -17,7 +18,7 @@ def _self_signed(certificate: x509.Certificate) -> bool:
     try:
         certificate.verify_directly_issued_by(certificate)
         return True
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, InvalidSignature):
         return False
 
 
@@ -26,7 +27,7 @@ def _verify_child(child: x509.Certificate, issuer: x509.Certificate) -> None:
         raise ValueError("certificate chain issuer/subject relationship is broken")
     try:
         child.verify_directly_issued_by(issuer)
-    except (ValueError, TypeError) as exc:
+    except (ValueError, TypeError, InvalidSignature) as exc:
         raise ValueError("certificate chain signature validation failed") from exc
 
 

@@ -77,6 +77,35 @@ class FullchainTests(unittest.TestCase):
             certificates, _ = parse_certificate_chain(output.read_bytes())
             self.assertEqual(len(certificates), 3)
 
+    def test_non_le_two_intermediates_with_duplicate_bundle(self):
+        leaf, intermediate, root = self.chain()
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        upper_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Enterprise Policy CA")])
+        # Reissue existing issuer/root keys into a four-certificate hierarchy.
+        upper = make_certificate(upper_name, upper_name, key.public_key(), key, ca=True)
+        cross = make_certificate(root.subject, upper_name, root.public_key(), key, ca=True)
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory)
+            pem = lambda c: c.public_bytes(serialization.Encoding.PEM)
+            (d / "leaf.crt").write_bytes(pem(leaf) + pem(intermediate))
+            (d / "issuer.crt").write_bytes(pem(intermediate) + pem(cross) + pem(upper))
+            build_vcf_fullchain(d / "leaf.crt", d / "issuer.crt", d / "full.pem",
+                               fetch=lambda url: self.fail("unexpected AIA request"))
+            certs, _ = parse_certificate_chain((d / "full.pem").read_bytes())
+            self.assertEqual([c.subject for c in certs],
+                             [leaf.subject, intermediate.subject, cross.subject, upper.subject])
+
+    def test_rejects_unrelated_non_le_issuer(self):
+        leaf, intermediate, root = self.chain()
+        other_leaf, other_intermediate, other_root = self.chain()
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory)
+            pem = lambda c: c.public_bytes(serialization.Encoding.PEM)
+            (d / "leaf.crt").write_bytes(pem(leaf))
+            (d / "issuer.crt").write_bytes(pem(other_intermediate) + pem(other_root))
+            with self.assertRaises(ValueError):
+                build_vcf_fullchain(d / "leaf.crt", d / "issuer.crt", d / "full.pem")
+
 
 if __name__ == "__main__":
     unittest.main()

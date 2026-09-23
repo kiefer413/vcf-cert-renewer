@@ -16,3 +16,7 @@
 
 Rotate credentials after suspected exposure. If a real secret entered Git
 history, treat it as compromised and publish only a clean history.
+
+EAB KID and HMAC are supplied together through root-only configuration. They are
+passed to lego through environment variables, excluded from Settings repr and
+command arguments. Captured signing output is suppressed on errors.

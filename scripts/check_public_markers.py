@@ -14,16 +14,16 @@ PRIVATE_KEY_RE = re.compile(
 )
 SECRET_ASSIGNMENT_RE = re.compile(
     rb"(?im)^[ \t]*(?:export[ \t]+)?"
-    rb"([A-Z0-9_]*(?:PASSWORD|TOKEN|SECRET|API_KEY)[A-Z0-9_]*)"
+    rb"([A-Z0-9_]*(?:PASSWORD|TOKEN|SECRET|API_KEY|EAB_HMAC|EAB_KID)[A-Z0-9_]*)"
     rb"[ \t]*[:=][ \t]*([^\s#]*)"
 )
 SAFE_EXAMPLE_VALUES = {
     b"", b"replace-me", b"changeme", b"example", b"dummy", b"test", b"file-token",
 }
 FORBIDDEN_SUFFIXES = (
-    ".pem", ".key", ".crt", ".cer", ".csr", ".p12", ".pfx", ".log",
+    ".pem", ".key", ".crt", ".cer", ".csr", ".p12", ".pfx", ".log", ".out",
 )
-FORBIDDEN_PARTS = {"out", ".lego"}
+FORBIDDEN_PARTS = {"out", ".lego", "acme"}
 CONFIG_SUFFIXES = {".env", ".yaml", ".yml", ".json", ".toml", ".ini", ".conf", ".config", ".example"}
 
 

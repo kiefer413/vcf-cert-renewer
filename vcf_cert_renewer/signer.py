@@ -51,6 +51,14 @@ def lego_command(settings: Settings, csr_path: Path) -> tuple[list[str], dict[st
         command.extend(["--dns.resolvers", resolver])
     command.extend(["--csr", str(csr_path)])
     environment = os.environ.copy()
+    # Settings are authoritative: inherited lego EAB credentials must not enable EAB.
+    for name in ("LEGO_EAB", "LEGO_EAB_KID", "LEGO_EAB_HMAC",
+                 "ACME_EAB_KID", "ACME_EAB_HMAC"):
+        environment.pop(name, None)
+    if settings.acme_eab_kid and settings.acme_eab_hmac:
+        command.insert(2, "--eab")
+        environment.update({"LEGO_EAB_KID": settings.acme_eab_kid,
+                            "LEGO_EAB_HMAC": settings.acme_eab_hmac})
     environment.update({
         "DNSUPDATE_NAMESERVER": str(settings.dns_nameserver),
         "DNSUPDATE_TSIG_KEY": str(settings.dns_tsig_key),
