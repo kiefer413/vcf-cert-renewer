@@ -1,5 +1,14 @@
 # v1.2.0
 
+## v1.3.0
+
+- Central `_FILE` secret resolution with safe errors and strict conflict handling.
+- systemd Credentials examples; backward-compatible direct environment settings.
+- Non-root batch container, controlled dependencies and lego 5.4.1 for amd64/arm64.
+- Docker/Podman/Compose examples and gated GHCR release workflow.
+- Offline secret, container and release regression checks.
+- Existing VCF/NSX authentication and FULL_RENEW scope remain unchanged.
+
 - Generic ACME v2 directory selection with optional EAB account registration.
 - Preserve explicit-server precedence, legacy ACME_MODE and staging defaults.
 - Validate EAB pairs early; keep credentials out of argv, repr and signing errors.

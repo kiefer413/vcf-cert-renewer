@@ -1,0 +1,14 @@
+# Deny everything; allow only the exact application source tree and build inputs.
+**
+!Dockerfile
+!.dockerignore
+!vcf_cert_renewer/
+vcf_cert_renewer/**
+!vcf_cert_renewer/*.py
+!vcf_cert_renewer/components/
+vcf_cert_renewer/components/**
+!vcf_cert_renewer/components/*.py
+!packaging/
+packaging/**
+!packaging/container-entrypoint.sh
+!packaging/requirements-container.txt

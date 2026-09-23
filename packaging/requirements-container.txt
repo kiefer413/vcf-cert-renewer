@@ -1,0 +1,10 @@
+# Controlled runtime set; update deliberately and validate both architectures.
+requests==2.32.5
+certifi==2026.2.25
+charset-normalizer==3.4.4
+idna==3.11
+urllib3==2.6.3
+cryptography==45.0.7
+cffi==2.0.0
+pycparser==2.23
+PyYAML==6.0.3

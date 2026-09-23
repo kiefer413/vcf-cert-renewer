@@ -1,0 +1,9 @@
+FROM vcf-cert-renewer:1.3.0
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    && git config --system --add safe.directory /work
+RUN pip install --no-cache-dir pytest==8.4.2
+USER 10001:10001
+WORKDIR /work
+ENTRYPOINT ["sh", "scripts/validate_release.sh"]

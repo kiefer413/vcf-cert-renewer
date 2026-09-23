@@ -18,6 +18,8 @@ SECRET_ENV_NAMES = frozenset({
     "VCF_API_TOKEN", "SDDC_USERNAME", "SDDC_PASSWORD", "VCF_CLIENT_ID",
     "VCF_CLIENT_SECRET", "DNSUPDATE_TSIG_SECRET", "ACME_EAB_KID", "ACME_EAB_HMAC",
 })
+SECRET_FILE_NAMES = frozenset(name + "_FILE" for name in SECRET_ENV_NAMES)
+
 DEFAULTS: dict[str, Any] = {
     "VCF_TOKEN_ENDPOINT": "https://vcenter.vcf.example.com/acs/t/CUSTOMER/token",
     "VCF_URL": "https://ops.vcf.example.com", "VCF_VERIFY_TLS": True,
@@ -51,6 +53,32 @@ YAML_KEYS = {
 
 class ConfigurationError(ValueError):
     """Raised when required configuration is missing or invalid."""
+
+
+def resolve_secrets(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve mounted UTF-8 secrets without exporting values or rendering input."""
+    result = dict(values)
+    for name in sorted(SECRET_ENV_NAMES):
+        file_name = name + "_FILE"
+        if name in values and file_name in values:
+            raise ConfigurationError(f"Set only one of {name} and {file_name}")
+        if file_name not in values:
+            continue
+        try:
+            path = Path(values[file_name])
+            if not values[file_name] or not path.is_file():
+                raise OSError()
+            # Decode bytes explicitly: universal-newline conversion would change
+            # embedded CRLFs. Remove only complete terminal LF/CRLF sequences.
+            secret = path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeError, TypeError, ValueError):
+            raise ConfigurationError(f"Unable to read secret file for {file_name}") from None
+        while secret.endswith("\n"):
+            secret = secret[:-2] if secret.endswith("\r\n") else secret[:-1]
+        if not secret:
+            raise ConfigurationError(f"Secret file for {file_name} is empty")
+        result[name] = secret
+    return result
 
 
 def _flatten(value: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
@@ -100,9 +128,9 @@ def _read_secrets(path: Path) -> dict[str, str]:
             raise ConfigurationError(f"Malformed secrets file {path} at line {number}")
         name, value = stripped.split("=", 1)
         name = name.strip()
-        if name not in SECRET_ENV_NAMES:
+        if name not in SECRET_ENV_NAMES | SECRET_FILE_NAMES:
             raise ConfigurationError(
-                f"Unsupported secret name in {path} at line {number}: {name}")
+                f"Unsupported secret name in {path} at line {number}")
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
             value = value[1:-1]
@@ -127,19 +155,19 @@ class Settings:
     base_url: str
     verify_tls: bool
     timeout_seconds: float
-    api_token: str | None
+    api_token: str | None = field(repr=False)
     nsx_url: str = "https://nsxt.vcf.example.com"
     nsx_verify_tls: bool = True
     sddc_url: str = "https://sddc.vcf.example.com"
-    sddc_username: str | None = None
-    sddc_password: str | None = None
+    sddc_username: str | None = field(default=None, repr=False)
+    sddc_password: str | None = field(default=None, repr=False)
     csr_country: str = "DK"
     csr_state: str = "Hovedstaden"
     csr_locality: str = "Copenhagen"
     csr_organization: str = "Example Organization"
     csr_organization_unit: str = "VCF"
-    client_id: str | None = None
-    client_secret: str | None = None
+    client_id: str | None = field(default=None, repr=False)
+    client_secret: str | None = field(default=None, repr=False)
     acme_mode: str = "staging"
     acme_server: str = ACME_DIRECTORIES["staging"]
     acme_email: str | None = None
@@ -149,7 +177,7 @@ class Settings:
     dns_nameserver: str | None = None
     dns_tsig_key: str | None = None
     dns_tsig_algorithm: str = "hmac-sha256."
-    dns_tsig_secret: str | None = None
+    dns_tsig_secret: str | None = field(default=None, repr=False)
     lego_path: Path = Path("lego")
     output_dir: Path = Path("out")
     renew_before_days: int = 30
@@ -182,13 +210,14 @@ class Settings:
             env["VCF_URL"] = env["VCF_BASE_URL"]
         if "DNSUPDATE_TSIG_KEY_NAME" in env and "DNSUPDATE_TSIG_KEY" not in env:
             env["DNSUPDATE_TSIG_KEY"] = env["DNSUPDATE_TSIG_KEY_NAME"]
-        supported = (set(DEFAULTS) | set(SECRET_ENV_NAMES) |
+        supported = (set(DEFAULTS) | set(SECRET_ENV_NAMES) | set(SECRET_FILE_NAMES) |
                      {"ACME_SERVER", "ACME_EMAIL", "DNSUPDATE_NAMESERVER",
                       "DNSUPDATE_TSIG_KEY"})
         values.update({key: value for key, value in env.items()
                        if key in supported})
         values.update({key: value for key, value in (overrides or {}).items()
                        if value is not None})
+        values = resolve_secrets(values)
         try:
             timeout = float(values["VCF_TIMEOUT_SECONDS"])
             renew_before = int(values["RENEW_BEFORE_DAYS"])
@@ -246,8 +275,10 @@ class Settings:
             client_secret=value("VCF_CLIENT_SECRET"),
             acme_mode=mode, acme_server=server,
             acme_email=value("ACME_EMAIL"),
-            acme_eab_kid=str(values.get("ACME_EAB_KID") or "").strip() or None,
-            acme_eab_hmac=str(values.get("ACME_EAB_HMAC") or "").strip() or None,
+            acme_eab_kid=(value("ACME_EAB_KID") if "ACME_EAB_KID_FILE" in values
+                          else str(values.get("ACME_EAB_KID") or "").strip() or None),
+            acme_eab_hmac=(value("ACME_EAB_HMAC") if "ACME_EAB_HMAC_FILE" in values
+                          else str(values.get("ACME_EAB_HMAC") or "").strip() or None),
             dns_provider=str(values["DNS_PROVIDER"]).strip().lower(),
             dns_nameserver=value("DNSUPDATE_NAMESERVER"),
             dns_tsig_key=value("DNSUPDATE_TSIG_KEY"),

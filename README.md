@@ -114,6 +114,8 @@ The supplied systemd unit invokes `/usr/bin/python3`, so install the dependencie
 
 ### Production configuration
 
+For v1.3.0 production deployments, prefer [mounted secrets and systemd Credentials](docs/secret-handling.md). The direct-value env-file example below remains supported for compatibility.
+
 `/etc/vcf-cert-renewer/vcf-cert-renewer.env` is a root-only environment file. At minimum, configure:
 
 - VCF, SDDC Manager, and NSX endpoints and credentials.
@@ -261,3 +263,10 @@ and production systemd scheduling are unchanged.
 
 Offline tests: install `pytest`, then run `python3 -m pytest -q`. The suite isolates
 host configuration and rejects socket connections to protect production systems.
+
+## v1.3.0: mounted secrets and containers
+
+See [secret handling and container deployment](docs/secret-handling.md) for `_FILE`,
+systemd Credentials, Docker/Podman, Compose and persistent ACME account storage.
+Direct environment configuration remains supported. Container images do not
+encrypt secrets; production file storage must be protected externally.

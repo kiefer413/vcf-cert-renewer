@@ -9,7 +9,7 @@ from typing import Any
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 
-from .config import ConfigurationError, Settings
+from .config import ConfigurationError, Settings, SECRET_ENV_NAMES, SECRET_FILE_NAMES
 from .importer import parse_certificate_chain
 
 
@@ -51,8 +51,11 @@ def lego_command(settings: Settings, csr_path: Path) -> tuple[list[str], dict[st
         command.extend(["--dns.resolvers", resolver])
     command.extend(["--csr", str(csr_path)])
     environment = os.environ.copy()
+    for name in SECRET_ENV_NAMES | SECRET_FILE_NAMES:
+        environment.pop(name, None)
     # Settings are authoritative: inherited lego EAB credentials must not enable EAB.
     for name in ("LEGO_EAB", "LEGO_EAB_KID", "LEGO_EAB_HMAC",
+                 "LEGO_EAB_KID_FILE", "LEGO_EAB_HMAC_FILE",
                  "ACME_EAB_KID", "ACME_EAB_HMAC"):
         environment.pop(name, None)
     if settings.acme_eab_kid and settings.acme_eab_hmac:

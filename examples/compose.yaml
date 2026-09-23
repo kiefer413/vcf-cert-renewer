@@ -1,0 +1,27 @@
+services:
+  renewer:
+    image: ghcr.io/kiefer413/vcf-cert-renewer:1.3.0
+    env_file: ./container.env
+    command: ["plan", "--all"]
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    volumes:
+      - renewer-data:/data
+    secrets:
+      - vcf_api_token
+      - sddc_password
+      - dns_tsig_secret
+    # No restart policy: this is a batch job.
+secrets:
+  vcf_api_token:
+    file: ./secrets/vcf_api_token
+  sddc_password:
+    file: ./secrets/sddc_password
+  dns_tsig_secret:
+    file: ./secrets/dns_tsig_secret
+volumes:
+  renewer-data:
