@@ -6,15 +6,17 @@ access. You do not install Python or lego on the Docker host or Kubernetes nodes
 The same GHCR image runs on amd64 and arm64, including directly in Kubernetes.
 There is no Kubernetes-specific build.
 
-This guide accompanies v1.3.1. Until that release is published, use the already
-published `ghcr.io/kiefer413/vcf-cert-renewer:1.3.0` in every image reference,
-including Compose and the CronJob. These deployment examples support both versions.
+This guide documents v1.4.0. Until that release is published, use the already
+published `ghcr.io/kiefer413/vcf-cert-renewer:1.4.0` in image references. The
+commands below show the v1.4.0 target tag.
 
 The program is a batch workflow: start, inspect certificates, renew those that are
 due, verify, then exit. Use a **CronJob**, not a continuously running Deployment.
-The existing FULL_RENEW scope stays limited to Operations, SDDC Manager, vCenter
-and the native NSX Manager MGMT_CLUSTER VIP. Container deployment does not change
-authentication or expand that scope.
+The existing Operations, SDDC Manager, vCenter and NSX Manager MGMT_CLUSTER
+workflows remain available. v1.4.0 also supports the dynamically discovered
+customer-managed VCF Automation external TLS leaf through Fleet. Internal
+Automation VMCA certificates remain outside mutation scope. Container deployment
+does not change authentication.
 
 ```text
 ConfigMap (ordinary settings)     Secret (credentials)
@@ -40,7 +42,7 @@ Keep `OUTPUT_DIR=/data`. Preserve TLS verification and configure CSR subject fie
 as needed (see [configuration](.env.example)).
 
 ```sh
-docker pull ghcr.io/kiefer413/vcf-cert-renewer:1.3.1
+docker pull ghcr.io/kiefer413/vcf-cert-renewer:1.4.0
 docker volume create vcf-renewer-data
 ```
 
@@ -75,7 +77,7 @@ docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
   --env-file ./container.env \
   --mount type=bind,src="$(pwd)/secrets",dst=/run/secrets,readonly \
   --mount type=volume,src=vcf-renewer-data,dst=/data \
-  ghcr.io/kiefer413/vcf-cert-renewer:1.3.1 plan --all
+  ghcr.io/kiefer413/vcf-cert-renewer:1.4.0 plan --all
 ```
 
 Review the plan and target scope. Before a real renewal, choose the intended
@@ -89,7 +91,7 @@ scheduled job. A successful inventory plan does not validate ACME issuance or DN
 update permissions; test the complete renewal workflow in a lab first.
 
 For an offline installation check, use `docker run --rm --network none
- ghcr.io/kiefer413/vcf-cert-renewer:1.3.1 --version` as one command.
+ ghcr.io/kiefer413/vcf-cert-renewer:1.4.0 --version` as one command.
 
 ### Podman and Compose
 

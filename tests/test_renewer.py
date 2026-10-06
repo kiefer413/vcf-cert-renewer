@@ -7,8 +7,9 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from vcf_cert_renewer.cli import BATCH_TARGETS, main
+from vcf_cert_renewer.certificates import CertificateNotFoundError
 from vcf_cert_renewer.config import ACME_DIRECTORIES, Settings
-from vcf_cert_renewer.renewer import execute_renewal, renewal_plan
+from vcf_cert_renewer.renewer import (RenewalExecutionError, execute_renewal, renewal_plan)
 
 
 LIVE = {
@@ -18,6 +19,12 @@ LIVE = {
 
 
 class RenewalTests(unittest.TestCase):
+    def setUp(self):
+        discovery = patch("vcf_cert_renewer.cli._discover_automation",
+                          side_effect=CertificateNotFoundError("not discovered"))
+        discovery.start()
+        self.addCleanup(discovery.stop)
+
     def settings(self, output=Path("out")):
         return Settings(
             "token", "url", True, 30, "api", acme_mode="production",
@@ -35,11 +42,12 @@ class RenewalTests(unittest.TestCase):
         self.assertEqual(BATCH_TARGETS, (
             "ops.vcf.example.com", "sddc.vcf.example.com",
             "vcenter.vcf.example.com", "nsxt.vcf.example.com"))
-        self.assertNotIn("nsxt01.vcf.example.com", BATCH_TARGETS)
+        self.assertNotIn("nsxt01.example.com", BATCH_TARGETS)
 
     def test_batch_uses_configured_four_targets(self):
         settings = self.settings()
         self.assertEqual(len(settings.renewal_targets), 4)
+
 
     def test_systemd_sample_never_forces_and_does_not_embed_secrets(self):
         service = Path("packaging/systemd/vcf-cert-renewer.service").read_text()
@@ -65,7 +73,9 @@ class RenewalTests(unittest.TestCase):
     @patch("vcf_cert_renewer.cli.renewal_plan")
     @patch.dict("os.environ", {
         "VCF_VERIFY_TLS": "true", "VCF_API_TOKEN": "api",
-        "ACME_MODE": "production"}, clear=True)
+        "ACME_MODE": "production", "ACME_EMAIL": "unit@localhost",
+        "DNSUPDATE_NAMESERVER": "192.0.2.53:53",
+        "DNSUPDATE_TSIG_KEY": "unit-key", "DNSUPDATE_TSIG_SECRET": "unit-secret"}, clear=True)
     def test_force_still_requires_yes_and_yes_executes(self, plan, execute, token):
         plan.return_value = {"result": "RENEWAL_REQUIRED"}
         self.assertEqual(main(["renew", "ops.example", "--force", "--yes"]), 0)
@@ -100,7 +110,11 @@ class RenewalTests(unittest.TestCase):
 
     @patch("vcf_cert_renewer.cli._execute_supported_renewal")
     @patch("vcf_cert_renewer.cli.renewal_plan")
-    @patch.dict("os.environ", {"ACME_MODE": "production", "VCF_VERIFY_TLS": "true"}, clear=True)
+    @patch.dict("os.environ", {"ACME_MODE": "production", "VCF_VERIFY_TLS": "true",
+                               "ACME_EMAIL": "unit@localhost",
+                               "DNSUPDATE_NAMESERVER": "192.0.2.53:53",
+                               "DNSUPDATE_TSIG_KEY": "unit-key",
+                               "DNSUPDATE_TSIG_SECRET": "unit-secret"}, clear=True)
     def test_batch_partial_failure_has_summary_and_nonzero_exit(self, plan, execute):
         plan.side_effect = lambda settings, fqdn, force=False: {
             "result": "RENEWAL_REQUIRED", "targetFqdn": fqdn}
@@ -125,12 +139,14 @@ class RenewalTests(unittest.TestCase):
         self.assertEqual(plan.call_count, 4)
         execute.assert_not_called()
 
-    @patch("vcf_cert_renewer.renewer.find_leaf_tls_certificate")
+    @patch("vcf_cert_renewer.renewer.resolve_fleet_certificate")
     def test_first_step_failure_stops_all_later_actions(self, find):
         client = Mock()
         client.query_certificates.side_effect = RuntimeError("stop")
-        with self.assertRaisesRegex(RuntimeError, "stop"):
+        with self.assertRaises(RenewalExecutionError) as caught:
             execute_renewal(client, self.settings(), "ops.example")
+        self.assertEqual(caught.exception.phase, "Fleet certificate discovery")
+        self.assertEqual(caught.exception.completed_mutations, ())
         find.assert_not_called()
         client.create_csr.assert_not_called()
 
@@ -139,7 +155,7 @@ class RenewalTests(unittest.TestCase):
     @patch("vcf_cert_renewer.renewer.import_certificate_chain")
     @patch("vcf_cert_renewer.renewer.build_vcf_fullchain")
     @patch("vcf_cert_renewer.renewer.sign_csr")
-    @patch("vcf_cert_renewer.renewer.find_leaf_tls_certificate")
+    @patch("vcf_cert_renewer.renewer.resolve_fleet_certificate")
     def test_successful_orchestration(self, find, sign, build, imported, replace, verify):
         with tempfile.TemporaryDirectory() as directory:
             settings = self.settings(Path(directory))

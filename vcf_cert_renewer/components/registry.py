@@ -6,14 +6,16 @@ from ipaddress import ip_address
 from typing import Any, Callable, Iterable
 
 from ..replacer import inspect_https_certificate
+from ..certificates import find_automation_certificate, CertificateNotFoundError, AmbiguousCertificateError
 from .base import ComponentAdapter
 from .classified import (EsxiAdapter, GenericFleetAdapter, IdentityAdapter,
                          NsxAdapter, NsxNodeAdapter, OperationsNetworksAdapter, RuntimeAdapter,
                          SddcAdapter, SupervisorAdapter, VcenterAdapter)
 from .operations import OperationsAdapter
+from .automation import AutomationAdapter, InternalAutomationAdapter
 
 ADAPTERS: tuple[type[ComponentAdapter], ...] = (
-    OperationsAdapter, IdentityAdapter, OperationsNetworksAdapter,
+    AutomationAdapter, InternalAutomationAdapter, OperationsAdapter, IdentityAdapter, OperationsNetworksAdapter,
     SupervisorAdapter, VcenterAdapter, NsxAdapter, NsxNodeAdapter, SddcAdapter,
     RuntimeAdapter, EsxiAdapter, GenericFleetAdapter,
 )
@@ -61,6 +63,21 @@ def discover_inventory(client: Any, *, page_size: int = 500, timeout: float = 5.
         live = [future.result() for future in futures]
     normalized = [adapter.normalize(item, status).as_dict()
                   for adapter, item, status in zip(adapters, records, live)]
+    automation_error = None
+    try:
+        find_automation_certificate(records)
+    except (CertificateNotFoundError, AmbiguousCertificateError, ValueError) as exc:
+        automation_error = str(exc)
+    for item, record in zip(normalized, records):
+        item["certificateType"] = record.get("type")
+        if item["adapterName"] == "automation":
+            item["componentDisplayName"] = "VCF Automation"
+            item["categoryDisplayName"] = "TLS Certificate"
+            item["certificateTypeDisplayName"] = "External CA"
+            if automation_error:
+                item.update(renewalCapability="PLAN_ONLY", supportsGenerateCsr=False,
+                            supportsImport=False, supportsReplace=False,
+                            supportedReason=automation_error)
     return sorted(normalized, key=lambda item: (item["componentType"], item["targetFqdn"]))
 
 

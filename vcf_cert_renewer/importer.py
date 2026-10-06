@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Any
+from typing import Any, Callable
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
-from .certificates import find_leaf_tls_certificate
+from .certificates import resolve_fleet_certificate, is_automation_external_tls
 from .client import VcfApiClient
 
 _PEM_CERTIFICATE = re.compile(
@@ -78,17 +78,36 @@ def list_imported_certificates(client: VcfApiClient) -> list[dict[str, Any]]:
 def import_certificate_chain(
     client: VcfApiClient, pem_chain: bytes, fqdn: str,
     *, filename: str = "certificate-chain.pem",
+    expected_certificate: dict[str, Any] | None = None,
+    validated_csr: str | None = None,
+    on_mutation_attempt: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Discover, validate against the CSR, and import a complete PEM chain."""
-    certificate = find_leaf_tls_certificate(client.query_certificates(), fqdn)
+    certificate = resolve_fleet_certificate(client.query_certificates(), fqdn,
+                                            expected_certificate=expected_certificate)
     certificate_id = certificate.get("certificateResourceKey")
     common_name = certificate.get("issuedToCommonName") or fqdn
     if not isinstance(certificate_id, str) or not certificate_id:
         raise ValueError("discovered certificate has no certificateResourceKey")
     if not isinstance(common_name, str) or not common_name:
         raise ValueError("discovered certificate has no common name")
-    csr_pem = client.fetch_csr(certificate_id, common_name)
+    if validated_csr is not None:
+        # The renewal pipeline passes the exact CSR that passed strict identity
+        # validation and was signed; do not make a weaker second selection.
+        csr_pem = validated_csr
+    elif is_automation_external_tls(certificate):
+        csr_pem = client.fetch_csr(
+            certificate_id, common_name, expected_fqdn=fqdn, strict_dns_san=True,
+            appliance=str(certificate.get("appliance") or ""),
+            component=str(certificate.get("vcfComponent") or "") or None)
+    else:
+        csr_pem = client.fetch_csr(certificate_id, common_name)
     info = validate_chain_for_csr(pem_chain, csr_pem, fqdn)
+    if is_automation_external_tls(certificate) and fqdn.rstrip(".").lower() not in {
+            name.rstrip(".").lower() for name in info.dns_names}:
+        raise ValueError("VCF Automation signed certificate lacks the endpoint DNS SAN")
+    if on_mutation_attempt:
+        on_mutation_attempt()
     response = client._request(
         "POST", "/suite-api/api/certificate",
         headers={"Content-Type": None},
@@ -98,10 +117,14 @@ def import_certificate_chain(
     payload = response.json()
     if not isinstance(payload, dict):
         raise ValueError("VCF import response was not a JSON object")
+    if client._state(payload) in {"FAILED", "ERROR", "CANCELLED", "CANCELED", "ABORTED"}:
+        raise ValueError("Fleet certificate import failed")
     imported = payload.get("certificates")
     if imported is not None and not isinstance(imported, list):
         raise ValueError("VCF import response contained invalid certificates data")
     first = imported[0] if imported and isinstance(imported[0], dict) else {}
+    if is_automation_external_tls(certificate) and not (first.get("id") or first.get("thumbprint")):
+        raise ValueError("Fleet certificate import did not confirm an imported certificate")
     return {"result": "IMPORTED",
             "importedCertificateId": first.get("id") or first.get("thumbprint"),
             "commonName": info.common_name, "dnsNames": list(info.dns_names),

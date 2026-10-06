@@ -8,8 +8,9 @@ import re
 
 import requests
 
-from .certificates import find_leaf_tls_certificate
+from .certificates import resolve_fleet_certificate, is_automation_external_tls
 from .config import Settings
+from .client import CsrNotFoundError
 from .importer import list_imported_certificates
 from .replacer import inspect_https_certificate
 from .sddc_client import SddcApiClient
@@ -172,7 +173,7 @@ def assemble_plan(fqdn: str, active: dict[str, Any], settings: Settings, *,
 
 def build_plan(client: Any, settings: Settings, fqdn: str, *, page_size: int = 500) -> dict[str, Any]:
     """Inspect state using certificate query and GET operations only."""
-    active = find_leaf_tls_certificate(client.query_certificates(page_size=page_size), fqdn)
+    active = resolve_fleet_certificate(client.query_certificates(page_size=page_size), fqdn)
     try:
         imported = list_imported_certificates(client)
     except (requests.RequestException, ValueError, OSError):
@@ -182,14 +183,27 @@ def build_plan(client: Any, settings: Settings, fqdn: str, *, page_size: int = 5
     csr_exists: bool | None = None
     if isinstance(certificate_id, str) and certificate_id:
         try:
-            client.fetch_csr(certificate_id, str(common_name))
+            client.fetch_csr(certificate_id, str(common_name),
+                             expected_fqdn=fqdn if is_automation_external_tls(active) else None,
+                             strict_dns_san=is_automation_external_tls(active),
+                             appliance=str(active.get("appliance") or "")
+                             if is_automation_external_tls(active) else None,
+                             component=str(active.get("vcfComponent") or "")
+                             if is_automation_external_tls(active) else None)
             csr_exists = True
-        except (requests.RequestException, ValueError, OSError):
+        except CsrNotFoundError:
+            csr_exists = False
+        except (requests.RequestException, OSError):
             csr_exists = False
     live = inspect_https_certificate(
         fqdn, timeout=min(float(settings.timeout_seconds), 15.0))
-    return assemble_plan(fqdn, active, settings, csr_exists=csr_exists,
-                         imported_certificates=imported, live_certificate=live)
+    result = assemble_plan(fqdn, active, settings, csr_exists=csr_exists,
+                           imported_certificates=imported, live_certificate=live)
+    if is_automation_external_tls(active):
+        result.update(componentType="VCF_AUTOMATION", componentDisplayName="VCF Automation",
+                      category="TLS_CERT", categoryDisplayName="TLS Certificate",
+                      certificateType="EXTERNAL_CA", certificateTypeDisplayName="External CA")
+    return result
 
 
 def build_domain_plan(client: SddcApiClient, settings: Settings, fqdn: str,

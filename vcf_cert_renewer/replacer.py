@@ -10,12 +10,12 @@ import re
 import socket
 import ssl
 import time
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 
-from .certificates import find_leaf_tls_certificate
+from .certificates import resolve_fleet_certificate
 from .client import VcfApiClient, WorkflowFailedError, WorkflowTimeoutError
 from .importer import list_imported_certificates, parse_certificate_chain
 
@@ -152,9 +152,13 @@ def certificate_chain_from_import(imported: dict[str, Any], *,
 def replace_certificate(client: VcfApiClient, fqdn: str, *,
                         thumbprint: str | None = None,
                         common_name: str | None = None,
-                        search_paths: Iterable[Path] = ()) -> tuple[str, dict[str, Any], bytes]:
+                        search_paths: Iterable[Path] = (),
+                        expected_certificate: dict[str, Any] | None = None,
+                        on_mutation_attempt: Callable[[], None] | None = None
+                        ) -> tuple[str, dict[str, Any], bytes]:
     """Start the documented Fleet replace workflow. This function performs the PUT."""
-    active = find_leaf_tls_certificate(client.query_certificates(), fqdn)
+    active = resolve_fleet_certificate(client.query_certificates(), fqdn,
+                                       expected_certificate=expected_certificate)
     certificate_id = active.get("certificateResourceKey")
     if not isinstance(certificate_id, str) or not certificate_id:
         raise ValueError("discovered certificate has no certificateResourceKey")
@@ -172,6 +176,8 @@ def replace_certificate(client: VcfApiClient, fqdn: str, *,
     actual = certificates[0].fingerprint(hashes.SHA256()).hex()
     if _normalized_thumbprint(actual) != _normalized_thumbprint(imported.get("thumbprint")):
         raise ValueError("resolved certificate chain does not match imported thumbprint")
+    if on_mutation_attempt:
+        on_mutation_attempt()
     response = client._request(
         "PUT",
         f"/suite-api/api/fleet-management/certificate-management/certificates/{certificate_id}",

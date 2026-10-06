@@ -14,12 +14,16 @@ from . import __version__
 
 from .auth import exchange_token
 from .certificates import (AmbiguousCertificateError, CertificateNotFoundError,
-                           find_leaf_tls_certificate, leaf_tls_certificates_for_hostname)
+                           find_leaf_tls_certificate, leaf_tls_certificates_for_hostname,
+                           find_automation_certificate, resolve_fleet_certificate,
+                           is_automation_external_tls)
 from .client import VcfApiClient, WorkflowFailedError, WorkflowTimeoutError
 from .components import adapter_for, discover_inventory, plan_inventory
 from .config import ConfigurationError, Settings
 from .fullchain import build_vcf_fullchain, predictable_fullchain_path
-from .renewer import execute_domain_renewal, execute_nsx_renewal, execute_renewal, renewal_plan
+from .renewer import (OPERATIONS_ACTIONS, RenewalExecutionError,
+                      execute_domain_renewal, execute_nsx_renewal, execute_renewal, renewal_plan)
+from .signer import sanitize_diagnostic, validate_signer_configuration
 from .nsx_client import NsxApiClient
 from .sddc_client import SddcApiClient
 from .signer import sign_csr
@@ -99,7 +103,7 @@ def _parser() -> argparse.ArgumentParser:
     renew = sub.add_parser("renew", help="safely orchestrate the renewal lifecycle")
     renew.add_argument("fqdn", nargs="?")
     renew.add_argument("--all", action="store_true", dest="all_targets",
-                       help="renew only the four production-validated v1 targets")
+                       help="renew existing supported targets and discovered external VCF Automation TLS")
     renew.add_argument("--force", action="store_true",
                        help="renew regardless of expiry threshold")
     gate = renew.add_mutually_exclusive_group()
@@ -111,29 +115,68 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _execute_supported_renewal(settings: Settings, fqdn: str, *,
-                               poll_interval: float, poll_timeout: float) -> dict[str, object]:
-    """Route one approved target through exactly its validated API family."""
-    adapter = adapter_for({"applianceFqdn": fqdn})
+                               poll_interval: float, poll_timeout: float,
+                               certificate: dict[str, object] | None = None) -> dict[str, object]:
+    """Validate route credentials and signer inputs before mutation."""
+    adapter = adapter_for(certificate or {"applianceFqdn": fqdn})
     if adapter.capability.value != "FULL_RENEW":
         raise ValueError(f"{fqdn} is not a FULL_RENEW target: {adapter.reason}")
     if adapter.management_path == "NSX_NATIVE_MGMT_CLUSTER":
+        settings.require_api_token()
+        validate_signer_configuration(settings)
         return execute_nsx_renewal(
             _nsx_client(settings), settings, fqdn,
             poll_interval=poll_interval, poll_timeout=poll_timeout)
     if adapter.management_path == "DOMAIN_MANAGED":
+        domain_client = _sddc_client(settings)
+        validate_signer_configuration(settings)
         return execute_domain_renewal(
-            _sddc_client(settings), settings, fqdn,
+            domain_client, settings, fqdn,
             resource_type=adapter.component_type,
             poll_interval=poll_interval, poll_timeout=poll_timeout)
-    if adapter.management_path == "FLEET_MANAGED" and adapter.name == "operations":
+    if adapter.management_path == "FLEET_MANAGED" and adapter.name in {"operations", "automation"}:
+        validate_signer_configuration(settings)
+        selected = {"certificate": certificate} if certificate is not None else {}
         return execute_renewal(
             _client(settings, exchange_token(settings)), settings, fqdn,
-            poll_interval=poll_interval, poll_timeout=poll_timeout)
+            poll_interval=poll_interval, poll_timeout=poll_timeout, **selected)
     raise ValueError(f"No validated renewal route for {fqdn}")
 
 
+def _discover_automation(settings: Settings) -> dict[str, object]:
+    client = _client(settings, exchange_token(settings))
+    return find_automation_certificate(client.query_certificates())
+
+
+def _automation_labels(certificate: dict[str, object]) -> dict[str, object]:
+    return {"componentType": "VCF_AUTOMATION", "componentDisplayName": "VCF Automation",
+            "category": "TLS_CERT", "categoryDisplayName": "TLS Certificate",
+            "certificateType": "EXTERNAL_CA", "certificateTypeDisplayName": "External CA",
+            "certificateResourceKey": certificate["certificateResourceKey"],
+            "plannedActions": OPERATIONS_ACTIONS}
+
+
+def _require_supported_fleet_target(certificates: list[dict[str, object]], fqdn: str,
+                                   action: str) -> dict[str, object]:
+    """Refuse explicit Fleet mutations outside a FULL_RENEW Fleet adapter."""
+    certificate = resolve_fleet_certificate(certificates, fqdn)
+    adapter = adapter_for(certificate)
+    support_flag = {
+        "generate-csr": "supports_generate_csr",
+        "import": "supports_import",
+        "replace": "supports_replace",
+    }[action]
+    if (adapter.capability.value != "FULL_RENEW"
+            or adapter.management_path != "FLEET_MANAGED"
+            or not getattr(adapter, support_flag, False)):
+        raise ValueError(
+            f"{fqdn} is not a supported Fleet-managed FULL_RENEW target for {action}: "
+            f"{adapter.reason}")
+    return certificate
+
+
 def _batch_renew(settings: Settings, args: argparse.Namespace) -> int:
-    """Plan every v1 target before mutation, then continue across target failures."""
+    """Preserve legacy planning gates and add independently discovered Automation."""
     plans: list[dict[str, object]] = []
     results: list[dict[str, object]] = []
     for fqdn in settings.renewal_targets:
@@ -148,10 +191,32 @@ def _batch_renew(settings: Settings, args: argparse.Namespace) -> int:
                          indent=2, sort_keys=True))
         return 1
 
+    automation = None
+    discovery = {"componentType": "VCF_AUTOMATION", "status": "NOT_DISCOVERED"}
+    try:
+        automation = _discover_automation(settings)
+        automation_fqdn = str(automation["applianceFqdn"]).rstrip(".").lower()
+        automation_plan = renewal_plan(settings, automation_fqdn, force=args.force)
+        automation_plan.update(_automation_labels(automation))
+        # Metadata takes precedence even if the endpoint resembles a legacy hostname.
+        plans = [plan for plan in plans if plan["targetFqdn"] != automation_fqdn]
+        plans.append(automation_plan)
+        discovery["status"] = "DISCOVERED"
+    except CertificateNotFoundError:
+        pass
+    except Exception as exc:
+        discovery["status"] = "FAILED"
+        results.append({"componentType": "VCF_AUTOMATION", "status": "FAILED",
+                        "phase": "DISCOVERY_OR_PLAN", "errorType": type(exc).__name__,
+                        "reason": "Ambiguous external TLS inventory; refusing to guess"
+                        if isinstance(exc, AmbiguousCertificateError) else
+                        "VCF Automation discovery or live HTTPS planning failed"})
+
     due = [plan for plan in plans if plan["result"] == "RENEWAL_REQUIRED"]
     approved = args.yes or args.apply
     if due and settings.acme_mode == "production" and not approved:
         print(json.dumps({"result": "PLAN_ONLY", "mode": "BATCH", "plans": plans,
+                          "discovery": discovery, "errors": results,
                           "summary": [{"targetFqdn": str(plan["targetFqdn"]),
                                        "status": "PENDING_APPROVAL"} for plan in due],
                           "mutatingCallsMade": False,
@@ -159,6 +224,22 @@ def _batch_renew(settings: Settings, args: argparse.Namespace) -> int:
                          indent=2, sort_keys=True))
         return 0
 
+    if due:
+        try:
+            validate_signer_configuration(settings)
+        except ConfigurationError as exc:
+            print(json.dumps({"result": "FAILED", "mode": "BATCH", "plans": plans,
+                              "discovery": discovery, "summary": [{
+                                  "status": "FAILED", "phase": "SIGNER_CONFIGURATION",
+                                  "errorType": type(exc).__name__, "error": str(exc),
+                                  "mutatingChangesMade": False, "mutationAttempted": False}],
+                              "mutatingCallsMade": False,
+                              "notice": "No changes have been made."},
+                             indent=2, sort_keys=True))
+            return 1
+        # Keep final batch output free of stale preflight-only notices.
+        for item in plans:
+            item.pop("notice", None)
     for plan in plans:
         fqdn = str(plan["targetFqdn"])
         if plan["result"] == "NO_RENEWAL_NEEDED":
@@ -166,17 +247,29 @@ def _batch_renew(settings: Settings, args: argparse.Namespace) -> int:
                             "reason": "NO_RENEWAL_NEEDED"})
             continue
         try:
+            selected = ({"certificate": automation}
+                        if plan.get("componentType") == "VCF_AUTOMATION" else {})
             renewal = _execute_supported_renewal(
                 settings, fqdn, poll_interval=args.poll_interval,
-                poll_timeout=args.poll_timeout)
+                poll_timeout=args.poll_timeout, **selected)
             results.append({"targetFqdn": fqdn, "status": "RENEWED",
                             "result": renewal})
+        except RenewalExecutionError as exc:
+            results.append({"targetFqdn": fqdn, "status": "FAILED",
+                            "phase": exc.phase, "errorType": type(exc.cause).__name__,
+                            "error": sanitize_diagnostic(exc.cause, settings),
+                            "changesAlreadyMade": list(exc.completed_mutations),
+                            "mutatingChangesMade": bool(exc.completed_mutations),
+                            "mutationAttempted": bool(exc.completed_mutations) or exc.mutation_outcome_unknown,
+                            "certificateReplacementRequested": exc.replacement_requested,
+                            "certificateReplacementPerformed": exc.replacement_completed,
+                            "mutationOutcomeUnknown": exc.mutation_outcome_unknown})
         except Exception as exc:  # Keep processing independent validated targets.
             results.append({"targetFqdn": fqdn, "status": "FAILED",
                             "phase": "RENEW", "errorType": type(exc).__name__})
     failed = any(item["status"] == "FAILED" for item in results)
     print(json.dumps({"result": "FAILED" if failed else "SUCCESS", "mode": "BATCH",
-                      "plans": plans, "summary": results,
+                      "plans": plans, "summary": results, "discovery": discovery,
                       "counts": {state: sum(item["status"] == state for item in results)
                                  for state in ("RENEWED", "SKIPPED", "FAILED")}},
                      indent=2, sort_keys=True))
@@ -257,19 +350,30 @@ def main(argv: list[str] | None = None) -> int:
             if not args.fqdn:
                 print("error: renew requires <fqdn> or --all", file=sys.stderr)
                 return 2
+            selected_certificate = None
+            initial_adapter = adapter_for({"applianceFqdn": args.fqdn})
+            if initial_adapter.capability.value != "FULL_RENEW":
+                candidate = _discover_automation(settings)
+                if str(candidate["applianceFqdn"]).rstrip(".").lower() == args.fqdn.rstrip(".").lower():
+                    selected_certificate = candidate
             plan = renewal_plan(settings, args.fqdn, force=args.force)
-            print(json.dumps(plan, indent=2, sort_keys=True))
+            if selected_certificate is not None:
+                plan.update(_automation_labels(selected_certificate))
             if plan["result"] == "NO_RENEWAL_NEEDED":
+                print(json.dumps(plan, indent=2, sort_keys=True))
                 return 0
             approved = args.yes or args.apply
             if settings.acme_mode == "production" and not approved:
+                print(json.dumps(plan, indent=2, sort_keys=True))
                 print(json.dumps({
                     "result": "PLAN_ONLY",
                     "reason": "Production mutation requires --yes or --apply.",
                     "notice": "No changes have been made.",
                 }, indent=2, sort_keys=True))
                 return 0
-            adapter = adapter_for({"applianceFqdn": args.fqdn})
+            plan["notice"] = "Preflight complete; renewal has not started."
+            print(json.dumps(plan, indent=2, sort_keys=True))
+            adapter = adapter_for(selected_certificate or {"applianceFqdn": args.fqdn})
             if adapter.capability.value != "FULL_RENEW":
                 print(json.dumps({
                     "result": "UNSUPPORTED",
@@ -278,9 +382,41 @@ def main(argv: list[str] | None = None) -> int:
                     "notice": "No changes have been made.",
                 }, indent=2, sort_keys=True))
                 return 2
-            result = _execute_supported_renewal(
-                settings, args.fqdn, poll_interval=args.poll_interval,
-                poll_timeout=args.poll_timeout)
+            try:
+                result = _execute_supported_renewal(
+                    settings, args.fqdn, poll_interval=args.poll_interval,
+                    poll_timeout=args.poll_timeout,
+                    **({"certificate": selected_certificate} if selected_certificate is not None else {}))
+            except ConfigurationError as exc:
+                if str(exc).startswith(("Missing SDDC Manager credentials:",
+                                        "VCF_API_TOKEN is not set")):
+                    raise
+                print(json.dumps({"result": "FAILED", "targetFqdn": args.fqdn.rstrip(".").lower(),
+                                  "phase": "SIGNER_CONFIGURATION",
+                                  "errorType": type(exc).__name__, "error": str(exc),
+                                  "mutatingChangesMade": False, "mutationAttempted": False,
+                                  "notice": "No changes have been made."},
+                                 indent=2, sort_keys=True))
+                return 1
+            except RenewalExecutionError as exc:
+                failure = {"result": "FAILED", "targetFqdn": args.fqdn.rstrip(".").lower(),
+                           "phase": exc.phase, "errorType": type(exc.cause).__name__,
+                           "error": sanitize_diagnostic(exc.cause, settings),
+                           "changesAlreadyMade": list(exc.completed_mutations),
+                           "mutatingChangesMade": bool(exc.completed_mutations),
+                           "mutationAttempted": bool(exc.completed_mutations) or exc.mutation_outcome_unknown,
+                           "certificateReplacementRequested": exc.replacement_requested,
+                           "certificateReplacementPerformed": exc.replacement_completed,
+                           "mutationOutcomeUnknown": exc.mutation_outcome_unknown}
+                if exc.mutation_outcome_unknown:
+                    failure["notice"] = ("A Fleet mutation request may have been accepted; "
+                                          "inspect its workflow before retrying. No rollback was performed.")
+                elif exc.completed_mutations:
+                    failure["notice"] = "No rollback was performed; see changesAlreadyMade."
+                else:
+                    failure["notice"] = "No changes have been made."
+                print(json.dumps(failure, indent=2, sort_keys=True))
+                return 1
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
         if args.command == "verify":
@@ -320,10 +456,13 @@ def main(argv: list[str] | None = None) -> int:
                                         page_size=args.page_size), indent=2, sort_keys=True))
             return 0
         if args.command in {"replace-certificate", "replace"}:
+            certificate = _require_supported_fleet_target(
+                client.query_certificates(), args.fqdn, "replace")
             search_paths = settings.output_dir.glob("**/*.pem") if settings.output_dir.exists() else ()
             request_id, initial, chain = replace_certificate(
                 client, args.fqdn, thumbprint=args.thumbprint,
-                common_name=args.common_name, search_paths=search_paths)
+                common_name=args.common_name, search_paths=search_paths,
+                expected_certificate=certificate)
             state = client._state(initial)
             workflow = initial if state in {"COMPLETED", "COMPLETE", "SUCCEEDED", "SUCCESS", "FINISHED"} else poll_workflow(
                 client, request_id, poll_interval=args.poll_interval,
@@ -333,8 +472,11 @@ def main(argv: list[str] | None = None) -> int:
                               "httpsCertificate": verification}, indent=2, sort_keys=True))
             return 0
         if args.command in {"import-certificate", "import"}:
-            result = import_certificate_chain(client, args.certificate.read_bytes(),
-                                              args.fqdn, filename=args.certificate.name)
+            certificate = _require_supported_fleet_target(
+                client.query_certificates(), args.fqdn, "import")
+            result = import_certificate_chain(
+                client, args.certificate.read_bytes(), args.fqdn,
+                filename=args.certificate.name, expected_certificate=certificate)
             print(json.dumps(result, indent=2, sort_keys=True)); return 0
         if args.command == "discover" and args.all_targets:
             print(json.dumps(discover_inventory(client, page_size=args.page_size),
@@ -342,7 +484,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         certificates = client.query_certificates(page_size=args.page_size)
         if args.command in {"generate-csr", "csr"}:
-            certificate = find_leaf_tls_certificate(certificates, args.hostname)
+            certificate = _require_supported_fleet_target(
+                certificates, args.hostname, "generate-csr")
+            # Re-read and pin identity immediately before the CSR mutation.
+            certificate = resolve_fleet_certificate(
+                client.query_certificates(page_size=args.page_size), args.hostname,
+                expected_certificate=certificate)
             request_id, initial = client.create_csr(certificate)
             state = client._state(initial)
             if state not in {"COMPLETED", "COMPLETE", "SUCCEEDED", "SUCCESS", "FINISHED"}:
@@ -351,7 +498,16 @@ def main(argv: list[str] | None = None) -> int:
             key = str(certificate["certificateResourceKey"])
             common_name = str(certificate.get("issuedToCommonName") or args.hostname)
             output = args.output or (Path(".") if args.command == "generate-csr" else settings.output_dir)
-            print(_write_csr(output, args.hostname, client.fetch_csr(key, common_name))); return 0
+            automation = is_automation_external_tls(certificate)
+            if automation:
+                csr = client.fetch_csr(
+                    key, common_name, expected_fqdn=args.hostname,
+                    strict_dns_san=True,
+                    appliance=str(certificate.get("appliance") or ""),
+                    component=str(certificate.get("vcfComponent") or "") or None)
+            else:
+                csr = client.fetch_csr(key, common_name)
+            print(_write_csr(output, args.hostname, csr)); return 0
         if args.command == "live-test":
             print(json.dumps(_safe_summary(find_leaf_tls_certificate(certificates, args.hostname)),
                              indent=2, sort_keys=True)); return 0

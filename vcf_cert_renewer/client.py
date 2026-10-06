@@ -3,9 +3,22 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Callable
 
 import requests
+from cryptography import x509
+
+
+class CsrNotFoundError(ValueError):
+    """Fleet has no CSR for the requested resource and common name."""
+
+
+class AmbiguousCsrError(ValueError):
+    """Fleet returned multiple possible CSRs for one certificate resource."""
+
+
+class CsrIdentityError(ValueError):
+    """A Fleet CSR does not match the requested endpoint/resource identity."""
 
 
 class WorkflowFailedError(RuntimeError):
@@ -48,15 +61,35 @@ class VcfApiClient:
         return response
 
     def query_certificates(self, *, page_size: int = 500) -> list[dict[str, Any]]:
-        response = self._request(
-            "POST",
-            "/suite-api/api/fleet-management/certificate-management/certificates/query",
-            params={"pageSize": page_size}, json={},
-        )
-        models = response.json().get("vcfCertificateModels")
-        if not isinstance(models, list):
-            raise ValueError("VCF response did not contain vcfCertificateModels list")
-        return models
+        if page_size <= 0:
+            raise ValueError("page_size must be positive")
+        result = []
+        page = 0
+        while True:
+            params = {"pageSize": page_size}
+            if page:
+                params["page"] = page
+            payload = self._request(
+                "POST",
+                "/suite-api/api/fleet-management/certificate-management/certificates/query",
+                params=params, json={},
+            ).json()
+            models = payload.get("vcfCertificateModels")
+            if not isinstance(models, list) or not all(isinstance(item, dict) for item in models):
+                raise ValueError("VCF response did not contain vcfCertificateModels list")
+            info = payload.get("pageInfo") or {}
+            total = info.get("totalCount")
+            if page and (not models or info.get("page", page) != page):
+                raise ValueError("Fleet inventory pagination did not advance")
+            result.extend(models)
+            if total is not None:
+                if len(result) >= int(total):
+                    return result
+            elif len(models) < page_size:
+                return result
+            page += 1
+            if page > 10000:
+                raise ValueError("Fleet inventory pagination exceeded safety limit")
 
     @staticmethod
     def _identifier(payload: dict[str, Any], response: requests.Response) -> str:
@@ -76,7 +109,9 @@ class VcfApiClient:
             return location.rsplit("/", 1)[-1]
         raise ValueError("CSR response did not contain a workflow/request identifier")
 
-    def create_csr(self, certificate: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    def create_csr(self, certificate: dict[str, Any], *,
+                   on_mutation_attempt: Callable[[], None] | None = None
+                   ) -> tuple[str, dict[str, Any]]:
         """Start CSR generation for a discovered certificate resource."""
         certificate_id = certificate.get("certificateResourceKey")
         if not isinstance(certificate_id, str) or not certificate_id:
@@ -87,6 +122,8 @@ class VcfApiClient:
         subject_alt_names = certificate.get("subjectAlternativeNames") or {}
         if not isinstance(subject_alt_names, dict):
             raise ValueError("discovered certificate has invalid subjectAlternativeNames")
+        if on_mutation_attempt:
+            on_mutation_attempt()
         response = self._request(
             "POST", "/suite-api/api/fleet-management/certificate-management/csrs",
             json={
@@ -166,8 +203,71 @@ class VcfApiClient:
         lines = [body[index:index + 64] for index in range(0, len(body), 64)]
         return "\n".join([begin, *lines, end, ""])
 
-    def fetch_csr(self, certificate_id: str, common_name: str) -> str:
-        """Fetch generated CSR PEM after its workflow completes."""
+    @staticmethod
+    def _automation_csr_identity_matches(record: dict[str, Any], certificate_id: str,
+                                         expected_fqdn: str, appliance: str,
+                                         component: str | None) -> bool:
+        """Require observed resource and endpoint identity before reusing VCFA CSR."""
+        resource_ids = [record.get(name) for name in
+                        ("certificateId", "certificateResourceKey", "resourceId")
+                        if record.get(name) not in (None, "")]
+        if not resource_ids or any(not isinstance(value, str) or value != certificate_id
+                                   for value in resource_ids):
+            return False
+
+        appliance_values = [record.get(name) for name in
+                            ("appliance", "applianceType", "applianceName")
+                            if record.get(name) not in (None, "")]
+        if not appliance_values:
+            return False
+        accepted_appliances = {"VCF_AUTOMATION", "ARIA_AUTOMATION"}
+        expected_appliance = appliance.upper()
+        for value in appliance_values:
+            candidate = str(value).upper()
+            if (candidate != expected_appliance and
+                    not (candidate in accepted_appliances and
+                         expected_appliance in accepted_appliances)):
+                return False
+
+        endpoint_values = [record.get(name) for name in
+                           ("applianceFqdn", "endpointFqdn")
+                           if record.get(name) not in (None, "")]
+        if not endpoint_values:
+            return False
+        wanted = expected_fqdn.rstrip(".").casefold()
+        if any(str(value).rstrip(".").casefold() != wanted for value in endpoint_values):
+            return False
+
+        if component:
+            component_values = [record.get(name) for name in
+                                ("vcfComponent", "componentType", "component")
+                                if record.get(name) not in (None, "")]
+            if any(str(value).casefold() != component.casefold()
+                   for value in component_values):
+                return False
+        return True
+
+    @staticmethod
+    def _csr_has_dns_san(csr: str, expected_fqdn: str) -> bool:
+        try:
+            parsed = x509.load_pem_x509_csr(csr.encode("ascii"))
+            names = parsed.extensions.get_extension_for_class(
+                x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)
+        except (x509.ExtensionNotFound, ValueError, UnicodeError):
+            return False
+        wanted = expected_fqdn.rstrip(".").casefold()
+        return wanted in {name.rstrip(".").casefold() for name in names}
+
+    def fetch_csr(self, certificate_id: str, common_name: str, *,
+                  expected_fqdn: str | None = None,
+                  strict_dns_san: bool = False,
+                  appliance: str | None = None,
+                  component: str | None = None) -> str:
+        """Fetch candidates and validate client-side before selecting a CSR.
+
+        Fleet's certificateId query filter is retained as a hint only; historical
+        records may still be returned after certificate replacement.
+        """
         response = self._request(
             "GET", "/suite-api/api/fleet-management/certificate-management/csrs",
             params={"certificateId": certificate_id, "commonName": common_name,
@@ -179,11 +279,76 @@ class VcfApiClient:
         records = payload.get("certificateSignatureInfo")
         if not isinstance(records, list):
             raise ValueError("CSR fetch response did not contain certificateSignatureInfo")
-        matching = [item for item in records if isinstance(item, dict) and
-                    item.get("commonName", "").rstrip(".").lower() == common_name.rstrip(".").lower()]
-        if len(matching) != 1:
-            raise ValueError(f"expected one generated CSR for {common_name}, found {len(matching)}")
-        csr = self._csr_from(matching[0])
+        usable = [item for item in records if isinstance(item, dict)]
+        if not usable:
+            raise CsrNotFoundError(f"No generated CSR found for certificate resource {certificate_id}")
+        matching = [item for item in usable if
+                    str(item.get("commonName", "")).rstrip(".").casefold()
+                    == common_name.rstrip(".").casefold()]
+        if appliance and expected_fqdn:
+            # CSR history is not authoritative merely because the server accepted
+            # a certificateId filter. Only current resource identity plus the
+            # expected appliance/endpoint and SAN can make an entry reusable.
+            reusable: list[tuple[dict[str, Any], str]] = []
+            for item in matching:
+                if not self._automation_csr_identity_matches(
+                        item, certificate_id, expected_fqdn, appliance, component):
+                    continue
+                item_csr = self._csr_from(item)
+                if not item_csr:
+                    continue
+                try:
+                    normalized_item_csr = self._normalize_csr_pem(item_csr)
+                except ValueError:
+                    continue
+                if not self._csr_has_dns_san(normalized_item_csr, expected_fqdn):
+                    continue
+                reusable.append((item, normalized_item_csr))
+            if not reusable:
+                raise CsrNotFoundError(
+                    f"No reusable CSR found for current Automation resource {certificate_id}")
+            if len(reusable) > 1:
+                raise AmbiguousCsrError(
+                    f"Found multiple reusable CSRs for Automation resource {certificate_id}")
+            return reusable[0][1]
+
+        if len(matching) > 1:
+            raise AmbiguousCsrError(f"Found multiple generated CSRs for certificate resource {certificate_id}")
+        if not matching:
+            raise CsrIdentityError("Fleet CSR records do not match the requested common name")
+        selected = matching[0]
+        returned_id = selected.get("certificateId") or selected.get("certificateResourceKey")
+        if returned_id and str(returned_id) != certificate_id:
+            raise CsrIdentityError("Fleet CSR belongs to a different certificate resource")
+        returned_appliance = selected.get("appliance") or selected.get("applianceType")
+        if appliance and returned_appliance and str(returned_appliance) != appliance:
+            raise CsrIdentityError("Fleet CSR belongs to a different appliance")
+        returned_fqdn = selected.get("applianceFqdn")
+        if expected_fqdn and returned_fqdn and str(returned_fqdn).rstrip(".").casefold() != expected_fqdn.rstrip(".").casefold():
+            raise CsrIdentityError("Fleet CSR belongs to a different endpoint")
+        csr = self._csr_from(selected)
         if not csr:
             raise ValueError("CSR fetch response did not contain PEM data")
-        return self._normalize_csr_pem(csr)
+        normalized = self._normalize_csr_pem(csr)
+        if expected_fqdn:
+            try:
+                parsed = x509.load_pem_x509_csr(normalized.encode("ascii"))
+                names = parsed.extensions.get_extension_for_class(
+                    x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)
+            except x509.ExtensionNotFound:
+                names = []
+            except (ValueError, UnicodeError) as exc:
+                raise CsrIdentityError("Fleet returned an invalid CSR") from exc
+            wanted = expected_fqdn.rstrip(".").casefold()
+            normalized_names = {name.rstrip(".").casefold() for name in names}
+            common_names = [attribute.value for attribute in
+                            parsed.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)]
+            if strict_dns_san and wanted not in normalized_names:
+                raise CsrIdentityError("Fleet CSR DNS SAN does not match the external endpoint")
+            if names and wanted not in normalized_names:
+                raise CsrIdentityError("Fleet CSR DNS SAN does not match the requested endpoint")
+            if not names and common_names and common_names[0].rstrip(".").casefold() != wanted:
+                raise CsrIdentityError("Fleet CSR common name does not match the requested endpoint")
+            if not names and not common_names:
+                raise CsrIdentityError("Fleet CSR has no DNS SAN or common name")
+        return normalized

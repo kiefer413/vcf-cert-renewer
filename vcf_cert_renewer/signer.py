@@ -5,12 +5,62 @@ import os
 from pathlib import Path
 import subprocess
 from typing import Any
+import re
+from urllib.parse import quote
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 
 from .config import ConfigurationError, Settings, SECRET_ENV_NAMES, SECRET_FILE_NAMES
 from .importer import parse_certificate_chain
+
+
+
+def _is_placeholder(value: str, *, email: bool = False) -> bool:
+    """Reject reserved example/test names without restricting private DNS names."""
+    text = value.strip().rstrip(".").casefold()
+    if email and "@" in text:
+        text = text.rsplit("@", 1)[1]
+    if not text:
+        return False
+    if text.endswith((".invalid", ".example", ".test")):
+        return True
+    labels = text.split(".")
+    return "example" in labels
+
+
+def _validate_signer_configuration(settings: Settings) -> None:
+    if settings.acme_email and _is_placeholder(settings.acme_email, email=True):
+        raise ConfigurationError("ACME_EMAIL contains an example/placeholder value")
+    if settings.dns_nameserver and _is_placeholder(settings.dns_nameserver.split(":", 1)[0]):
+        # Bracketed IPv6 is never a placeholder DNS name; leave it to the DNS provider.
+        if not settings.dns_nameserver.startswith("["):
+            raise ConfigurationError("DNSUPDATE_NAMESERVER contains an example/placeholder value")
+
+
+def sanitize_diagnostic(output: object, settings: Settings, *, limit: int = 2000) -> str:
+    """Bound external tool diagnostics and redact all known application secrets."""
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", errors="replace")
+    text = str(output)
+    text = re.sub(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))", "", text)
+    text = re.sub(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+                  "[PRIVATE KEY REDACTED]", text, flags=re.DOTALL)
+    secrets = [
+        settings.dns_tsig_secret, settings.acme_eab_hmac, settings.acme_eab_kid,
+        settings.api_token, settings.sddc_password, settings.client_secret,
+    ]
+    for secret in sorted((str(value) for value in secrets if value), key=len, reverse=True):
+        for variant in {secret, quote(secret, safe=""), quote(secret, safe="/" )}:
+            if variant:
+                text = text.replace(variant, "[REDACTED]")
+    text = "".join(char if char in "\n\t" or char.isprintable() else " " for char in text)
+    text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+    if len(text) > limit:
+        text = text[:limit - 3].rstrip() + "..."
+    return text
 
 
 def csr_names(csr_path: Path) -> tuple[str, ...]:
@@ -28,8 +78,7 @@ def csr_names(csr_path: Path) -> tuple[str, ...]:
     return names
 
 
-def lego_command(settings: Settings, csr_path: Path) -> tuple[list[str], dict[str, str]]:
-    """Build argv/environment; argv and error messages never contain secrets."""
+def validate_signer_configuration(settings: Settings) -> None:
     required = {
         "ACME_EMAIL": settings.acme_email,
         "DNSUPDATE_NAMESERVER": settings.dns_nameserver,
@@ -39,8 +88,14 @@ def lego_command(settings: Settings, csr_path: Path) -> tuple[list[str], dict[st
     missing = [name for name, value in required.items() if not value]
     if missing:
         raise ConfigurationError("missing signer configuration: " + ", ".join(missing))
+    _validate_signer_configuration(settings)
     if settings.dns_provider != "rfc2136":
         raise ConfigurationError("DNS_PROVIDER must be rfc2136")
+
+
+def lego_command(settings: Settings, csr_path: Path) -> tuple[list[str], dict[str, str]]:
+    """Build argv/environment; argv and error messages never contain secrets."""
+    validate_signer_configuration(settings)
     account_path = settings.output_dir / "acme" / settings.acme_mode
     command = [
         str(settings.lego_path), "run", "--accept-tos", "--email", str(settings.acme_email),
@@ -102,9 +157,18 @@ def sign_csr(settings: Settings, csr_path: Path) -> dict[str, Any]:
         subprocess.run(
             command, env=environment, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as exc:
+        stdout = sanitize_diagnostic(exc.stdout, settings)
+        stderr = sanitize_diagnostic(exc.stderr, settings)
+        details = "; ".join(value for value in
+                             (f"stdout: {stdout}" if stdout else "",
+                              f"stderr: {stderr}" if stderr else "") if value)
+        hint = (" Verify the configured ACME account state and account key; "
+                "no account was recreated."
+                if "accountdoesnotexist" in (stdout + "\n" + stderr).casefold() else "")
+        suffix = f"; {details}" if details else "; lego returned no diagnostic output"
         raise ValueError(
-            f"lego signing failed with exit status {exc.returncode}; "
-            "output was suppressed") from None
+            f"lego signing failed with exit status {exc.returncode}{suffix}.{hint}"
+        ) from None
     leaf_path = _matching_leaf(account_path, csr)
     issuer_path = leaf_path.with_name(
         leaf_path.name.removesuffix(".crt") + ".issuer.crt")

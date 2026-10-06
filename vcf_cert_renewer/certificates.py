@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ipaddress import ip_address
+import re
 from typing import Any, Iterable
 
 
@@ -61,3 +63,60 @@ def find_leaf_tls_certificate(
             + ", ".join(keys)
         )
     return matches[0]
+
+
+AUTOMATION_APPLIANCES = frozenset({"VCF_AUTOMATION", "ARIA_AUTOMATION"})
+
+
+def is_automation_external_tls(certificate: dict[str, Any]) -> bool:
+    """Match observed Fleet semantics, never hostname conventions."""
+    metadata = certificate.get("certificateMetadata") or {}
+    return (certificate.get("appliance") in AUTOMATION_APPLIANCES
+            and certificate.get("category") == "TLS_CERT"
+            and certificate.get("type") == "EXTERNAL_CA"
+            and isinstance(metadata, dict)
+            and metadata.get("certificateChainRole") == "LEAF"
+            and metadata.get("certificatePurpose") == "TLS_CERT")
+
+
+def find_automation_certificate(certificates: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    matches = [item for item in certificates if is_automation_external_tls(item)]
+    if not matches:
+        raise CertificateNotFoundError("VCF Automation external TLS certificate not discovered")
+    if len(matches) != 1:
+        raise AmbiguousCertificateError(
+            f"VCF Automation: {len(matches)} external TLS certificates found; refusing to guess")
+    certificate = matches[0]
+    if certificate["certificateMetadata"].get("managementLevel") != "CUSTOMER_MANAGED_FULL_MANAGEMENT":
+        raise ValueError("VCF Automation external TLS certificate is not fully Fleet managed")
+    fqdn = certificate.get("applianceFqdn")
+    key = certificate.get("certificateResourceKey")
+    if not isinstance(fqdn, str) or not fqdn or not isinstance(key, str) or not key:
+        raise ValueError("VCF Automation inventory lacks endpoint or resource key")
+    # Endpoint is used as a DNS/SNI name and as part of local output filenames.
+    if len(fqdn) > 253 or not all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+                                 for label in fqdn.rstrip(".").split(".")):
+        raise ValueError("VCF Automation inventory has an invalid DNS endpoint")
+    try:
+        ip_address(fqdn)
+    except ValueError:
+        return certificate
+    raise ValueError("VCF Automation inventory endpoint must be a DNS name")
+
+
+def resolve_fleet_certificate(certificates: Iterable[dict[str, Any]], fqdn: str, *,
+                              expected_certificate: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Revalidate Automation identity before every Fleet mutation stage."""
+    records = list(certificates)
+    automation = ((expected_certificate or {}).get("appliance") in AUTOMATION_APPLIANCES
+                  or any(item.get("appliance") in AUTOMATION_APPLIANCES
+                         and _hostname_matches(item, fqdn) for item in records))
+    if automation:
+        selected = find_automation_certificate(records)
+        if selected["applianceFqdn"].rstrip(".").lower() != fqdn.rstrip(".").lower():
+            raise ValueError("Requested endpoint is not the external VCF Automation TLS endpoint")
+    else:
+        selected = find_leaf_tls_certificate(records, fqdn)
+    if expected_certificate is not None and selected.get("certificateResourceKey") != expected_certificate.get("certificateResourceKey"):
+        raise ValueError("Fleet certificate identity changed during renewal; refusing replacement")
+    return selected

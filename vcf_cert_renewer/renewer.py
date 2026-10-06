@@ -6,8 +6,8 @@ from pathlib import Path
 import time
 from typing import Any, Callable
 
-from .certificates import find_leaf_tls_certificate
-from .client import VcfApiClient
+from .certificates import is_automation_external_tls, resolve_fleet_certificate
+from .client import (CsrNotFoundError, VcfApiClient, WorkflowFailedError)
 from .config import Settings
 from .fullchain import build_vcf_fullchain, predictable_fullchain_path
 from .importer import import_certificate_chain
@@ -189,41 +189,129 @@ def execute_nsx_renewal(client: Any, settings: Settings, fqdn: str, *,
             "apiCertificatesTouched": False}
 
 
+class RenewalExecutionError(RuntimeError):
+    """A failed Fleet renewal with truthful completed-mutation state."""
+
+    def __init__(self, phase: str, completed_mutations: list[str],
+                 replacement_requested: bool, replacement_completed: bool,
+                 mutation_outcome_unknown: bool, cause: Exception) -> None:
+        self.phase = phase
+        self.completed_mutations = tuple(completed_mutations)
+        self.replacement_requested = replacement_requested
+        self.replacement_completed = replacement_completed
+        self.mutation_outcome_unknown = mutation_outcome_unknown
+        self.cause = cause
+        super().__init__(f"Renewal failed during {phase}")
+
+
 def execute_renewal(client: VcfApiClient, settings: Settings, fqdn: str, *,
-                    poll_interval: float = 2, poll_timeout: float = 900) -> dict[str, Any]:
-    active = find_leaf_tls_certificate(client.query_certificates(), fqdn)
-    certificate_id = active.get("certificateResourceKey")
-    common_name = active.get("issuedToCommonName") or fqdn
-    if not isinstance(certificate_id, str) or not certificate_id:
-        raise ValueError("discovered certificate has no certificateResourceKey")
-    request_id, initial = client.create_csr(active)
-    if client._state(initial) not in SUCCESS_STATES:
-        client.wait_for_csr(request_id, poll_interval=poll_interval,
-                            poll_timeout=poll_timeout)
-    csr = client.fetch_csr(certificate_id, str(common_name))
-    settings.output_dir.mkdir(parents=True, exist_ok=True)
-    csr_path = settings.output_dir / f"{fqdn.rstrip('.').lower()}.csr.pem"
-    csr_path.write_text(csr, encoding="ascii")
-    signed = sign_csr(settings, csr_path)
-    fullchain_path = predictable_fullchain_path(settings.output_dir, fqdn)
-    build_vcf_fullchain(Path(str(signed["leafPath"])),
-                        Path(str(signed["issuerPath"])), fullchain_path)
-    imported = import_certificate_chain(
-        client, fullchain_path.read_bytes(), fqdn, filename=fullchain_path.name)
-    replace_request, replace_initial, chain = replace_certificate(
-        client, fqdn, thumbprint=str(signed["sha256Thumbprint"]),
-        search_paths=[fullchain_path])
-    workflow = replace_initial
-    if client._state(replace_initial) not in SUCCESS_STATES:
-        workflow = poll_workflow(client, replace_request,
-                                 poll_interval=poll_interval,
-                                 poll_timeout=poll_timeout)
-    verification = verify_https_certificate(fqdn, chain)
-    return {
-        "result": "RENEWED", "targetFqdn": fqdn.rstrip(".").lower(),
-        "csrPath": str(csr_path), "fullchainPath": str(fullchain_path),
-        "certificate": signed, "import": imported,
-        "replaceRequestId": replace_request,
-        "workflowState": client._state(workflow),
-        "liveHttpsCertificate": verification,
-    }
+                    poll_interval: float = 2, poll_timeout: float = 900,
+                    certificate: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Run the Fleet flow, safely reuse a matching Automation CSR and track mutations."""
+    phase = "Fleet certificate discovery"
+    completed_mutations: list[str] = []
+    replacement_requested = False
+    replacement_completed = False
+    mutation_outcome_unknown = False
+
+    def mark_mutation_attempted() -> None:
+        nonlocal mutation_outcome_unknown
+        mutation_outcome_unknown = True
+
+    try:
+        active = resolve_fleet_certificate(client.query_certificates(), fqdn,
+                                           expected_certificate=certificate)
+        selected = {"expected_certificate": active}
+        certificate_id = active.get("certificateResourceKey")
+        common_name = active.get("issuedToCommonName") or fqdn
+        if not isinstance(certificate_id, str) or not certificate_id:
+            raise ValueError("discovered certificate has no certificateResourceKey")
+
+        automation = is_automation_external_tls(active)
+        appliance = str(active.get("appliance") or "")
+        csr = None
+        reused_csr = False
+        if automation:
+            phase = "matching Fleet CSR lookup"
+            try:
+                csr = client.fetch_csr(certificate_id, str(common_name),
+                                       expected_fqdn=fqdn, strict_dns_san=True,
+                                       appliance=appliance,
+                                       component=str(active.get("vcfComponent") or "") or None)
+                reused_csr = True
+            except CsrNotFoundError:
+                pass
+
+        if csr is None:
+            phase = "Fleet CSR generation"
+            request_id, initial = client.create_csr(
+                active, on_mutation_attempt=mark_mutation_attempted)
+            mutation_outcome_unknown = False
+            completed_mutations.append("Fleet CSR generation requested")
+            if client._state(initial) in {"FAILED", "ERROR", "CANCELLED", "CANCELED", "ABORTED"}:
+                raise WorkflowFailedError("Fleet CSR generation failed")
+            if client._state(initial) not in SUCCESS_STATES:
+                client.wait_for_csr(request_id, poll_interval=poll_interval,
+                                    poll_timeout=poll_timeout)
+            completed_mutations[-1] = "Fleet CSR generated"
+            phase = "Fleet CSR fetch and identity validation"
+            csr = client.fetch_csr(certificate_id, str(common_name),
+                                   expected_fqdn=fqdn if automation else None,
+                                   strict_dns_san=automation,
+                                   appliance=appliance if automation else None,
+                                   component=(str(active.get("vcfComponent") or "") or None)
+                                   if automation else None)
+
+        settings.output_dir.mkdir(parents=True, exist_ok=True)
+        csr_path = settings.output_dir / f"{fqdn.rstrip('.').lower()}.csr.pem"
+        csr_path.write_text(csr, encoding="ascii")
+        phase = "ACME signing"
+        signed = sign_csr(settings, csr_path)
+        phase = "certificate chain construction"
+        fullchain_path = predictable_fullchain_path(settings.output_dir, fqdn)
+        build_vcf_fullchain(Path(str(signed["leafPath"])),
+                            Path(str(signed["issuerPath"])), fullchain_path)
+        phase = "Fleet certificate import"
+        imported = import_certificate_chain(
+            client, fullchain_path.read_bytes(), fqdn,
+            filename=fullchain_path.name, validated_csr=csr,
+            on_mutation_attempt=mark_mutation_attempted, **selected)
+        mutation_outcome_unknown = False
+        completed_mutations.append("Signed certificate imported into Fleet")
+        phase = "Fleet certificate replacement request"
+        replace_request, replace_initial, chain = replace_certificate(
+            client, fqdn, thumbprint=str(signed["sha256Thumbprint"]),
+            search_paths=[fullchain_path], on_mutation_attempt=mark_mutation_attempted,
+            **selected)
+        mutation_outcome_unknown = False
+        replacement_requested = True
+        completed_mutations.append("Fleet certificate replacement requested")
+        workflow = replace_initial
+        if client._state(replace_initial) in {"FAILED", "ERROR", "CANCELLED", "CANCELED", "ABORTED"}:
+            raise WorkflowFailedError("Fleet certificate replacement failed")
+        if client._state(replace_initial) not in SUCCESS_STATES:
+            phase = "Fleet replacement workflow"
+            workflow = poll_workflow(client, replace_request,
+                                     poll_interval=poll_interval,
+                                     poll_timeout=poll_timeout)
+        replacement_completed = True
+        completed_mutations.append("Fleet certificate replacement workflow completed")
+        phase = "live HTTPS verification"
+        verification = verify_https_certificate(fqdn, chain)
+        return {
+            "result": "RENEWED", "targetFqdn": fqdn.rstrip(".").lower(),
+            "csrPath": str(csr_path), "fullchainPath": str(fullchain_path),
+            "certificate": signed, "import": imported,
+            "replaceRequestId": replace_request,
+            "workflowState": client._state(workflow),
+            "liveHttpsCertificate": verification,
+            "reusedExistingCsr": reused_csr,
+            "completedMutations": completed_mutations,
+            "certificateReplacementPerformed": True,
+        }
+    except RenewalExecutionError:
+        raise
+    except Exception as exc:
+        raise RenewalExecutionError(phase, completed_mutations,
+                                    replacement_requested, replacement_completed,
+                                    mutation_outcome_unknown, exc) from None

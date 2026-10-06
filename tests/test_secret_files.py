@@ -86,7 +86,7 @@ def test_signer_file_credentials_and_no_unrelated_inheritance(tmp_path):
     for name in ('ACME_EAB_KID', 'ACME_EAB_HMAC', 'DNSUPDATE_TSIG_SECRET'):
         p = tmp_path/name; p.write_text('dummy-' + name + '\n')
         env[name + '_FILE'] = str(p)
-    s = replace(load(env), acme_email='admin@example.com',
+    s = replace(load(env), acme_email='unit@localhost',
                 dns_nameserver='192.0.2.53:53', dns_tsig_key='example-key')
     with patch.dict(os.environ, {'SDDC_PASSWORD': 'dummy-unrelated', 'VCF_API_TOKEN': 'dummy-token'}):
         cmd, child = lego_command(s, tmp_path/'example.csr')
@@ -119,7 +119,7 @@ def test_file_signing_failure_suppresses_all_secrets(tmp_path, caplog):
     for name in ('ACME_EAB_KID', 'ACME_EAB_HMAC', 'DNSUPDATE_TSIG_SECRET'):
         p = tmp_path/name; p.write_text('dummy-hidden-' + name)
         values[name + '_FILE'] = str(p)
-    settings = replace(load(values), acme_email='admin@example.com',
+    settings = replace(load(values), acme_email='unit@localhost',
                        dns_nameserver='192.0.2.53:53', dns_tsig_key='example-key',
                        output_dir=tmp_path/'output')
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -136,7 +136,7 @@ def test_file_signing_failure_suppresses_all_secrets(tmp_path, caplog):
 
 
 def test_inherited_lego_eab_files_cannot_enable_credentials(tmp_path):
-    s = replace(load({}), acme_email='admin@example.com',
+    s = replace(load({}), acme_email='unit@localhost',
                 dns_nameserver='192.0.2.53:53', dns_tsig_key='example-key',
                 dns_tsig_secret='dummy-tsig')
     with patch.dict(os.environ, {'LEGO_EAB_KID_FILE': '/dummy-kid', 'LEGO_EAB_HMAC_FILE': '/dummy-hmac'}):

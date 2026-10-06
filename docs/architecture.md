@@ -7,10 +7,7 @@ different mutation route.
 
 ## Boundaries
 
-Only four browser-facing endpoints have mutation authority: Operations through
-Fleet, SDDC Manager and vCenter through the domain resource-certificate API,
-and the NSX Manager VIP through native `MGMT_CLUSTER`. All other records remain
-read-only, discovery-only, or unsupported.
+The four configured administrative endpoints keep their established mutation routes: Operations through Fleet, SDDC Manager and vCenter through the domain resource-certificate API, and the NSX Manager VIP through native `MGMT_CLUSTER`. VCF Automation adds a separately discovered Fleet-managed external TLS leaf. Internal Automation VMCA/runtime and all other ineligible records remain read-only, discovery-only, or unsupported.
 
 `discover --all` performs Fleet inventory and live TLS inspection. `plan --all`
 adds normalized capability and planned-action output. Neither command creates a
@@ -19,6 +16,7 @@ CSR, invokes ACME, imports material, replaces a certificate, or writes output.
 ## API families
 
 - Operations uses Fleet certificate discovery, CSR, import, and replace APIs.
+- VCF Automation selects only a fully managed External CA TLS leaf and uses the same Fleet lifecycle with strict resource/CSR identity checks.
 - SDDC Manager and vCenter share the official domain-managed engine. It
   discovers dynamic domain/resource identifiers and polls returned tasks.
 - Native NSX uses the `MGMT_CLUSTER` certificate profile for the cluster VIP.
@@ -40,9 +38,7 @@ public CSR and stores only its own ACME account key below `OUTPUT_DIR`. The
 fullchain builder verifies issuer relationships and emits the ordering expected
 by VCF.
 
-Batch renewal plans all four configured endpoints before any mutation. A
-planning failure aborts the batch. Approved, due targets then run independently
-in deterministic order so one target failure cannot broaden scope.
+Batch renewal plans all four configured endpoints and separately discovers the eligible Automation certificate. A configured-target planning failure aborts before mutation; absent or failed Automation discovery is reported without broadening scope or blocking unrelated configured targets. Approved, due targets then run independently in deterministic order.
 
 See [renewal flow](renewal-flow.md), [authentication](authentication.md), and
 [security](security.md) for operational details.

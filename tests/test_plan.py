@@ -12,10 +12,10 @@ from vcf_cert_renewer.plan import (assemble_plan, build_plan,
 
 ACTIVE = {
     "certificateResourceKey": "dynamic-key", "category": "TLS_CERT",
-    "applianceFqdn": "ops.vcf.example.com",
-    "issuedToCommonName": "ops.vcf.example.com", "issuedBy": "Lab Issuer",
+    "applianceFqdn": "operations.example.com",
+    "issuedToCommonName": "operations.example.com", "issuedBy": "Lab Issuer",
     "notBefore": "2026-01-01T00:00:00Z", "notAfter": "2026-10-01T00:00:00Z",
-    "daysToExpire": 17, "subjectAlternativeNames": {"dns": ["ops.vcf.example.com"]},
+    "daysToExpire": 17, "subjectAlternativeNames": {"dns": ["operations.example.com"]},
     "certificateMetadata": {"certificateChainRole": "LEAF", "managementLevel": "CUSTOMER_MANAGED"},
 }
 
@@ -23,9 +23,9 @@ ACTIVE = {
 class PlanTests(unittest.TestCase):
     @patch.dict("os.environ", {}, clear=True)
     def test_assembles_required_safe_output(self):
-        result = assemble_plan("OPS.vcf.example.com", ACTIVE, Settings.from_env(),
+        result = assemble_plan("OPERATIONS.EXAMPLE.COM", ACTIVE, Settings.from_env(),
                                csr_exists=True, imported_certificates=[])
-        self.assertEqual(result["targetFqdn"], "ops.vcf.example.com")
+        self.assertEqual(result["targetFqdn"], "operations.example.com")
         self.assertEqual(result["activeLeafTlsCertificate"]["issuer"], "Lab Issuer")
         self.assertTrue(result["activeLeafTlsCertificate"]["customerManaged"])
         self.assertEqual(result["expectedActions"],
@@ -34,8 +34,8 @@ class PlanTests(unittest.TestCase):
 
     @patch.dict("os.environ", {}, clear=True)
     @patch("vcf_cert_renewer.plan.inspect_https_certificate", return_value={
-        "commonName": "ops.vcf.example.com", "subject": "CN=ops.vcf.example.com",
-        "issuer": "Lab Issuer", "sans": ["ops.vcf.example.com"],
+        "commonName": "operations.example.com", "subject": "CN=operations.example.com",
+        "issuer": "Lab Issuer", "sans": ["operations.example.com"],
         "notBefore": "2026-01-01T00:00:00+00:00",
         "notAfter": "2026-10-01T00:00:00+00:00",
         "sha256Thumbprint": "aabb"})
@@ -44,9 +44,11 @@ class PlanTests(unittest.TestCase):
         client = Mock()
         client.query_certificates.return_value = [ACTIVE]
         client.fetch_csr.return_value = "CSR"
-        result = build_plan(client, Settings.from_env(), "ops.vcf.example.com")
+        result = build_plan(client, Settings.from_env(), "operations.example.com")
         client.query_certificates.assert_called_once_with(page_size=500)
-        client.fetch_csr.assert_called_once_with("dynamic-key", "ops.vcf.example.com")
+        client.fetch_csr.assert_called_once_with(
+            "dynamic-key", "operations.example.com", expected_fqdn=None,
+            strict_dns_san=False, appliance=None, component=None)
         self.assertFalse(client.create_csr.called)
         self.assertFalse(client.session.post.called)
         self.assertFalse(client.session.put.called)
@@ -55,7 +57,7 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(result["inventoryMatchesLive"])
         self.assertEqual(result["inventoryComparisonStatus"],
                          "STALE_OR_INCOMPLETE_INVENTORY")
-        inspect.assert_called_once_with("ops.vcf.example.com", timeout=15.0)
+        inspect.assert_called_once_with("operations.example.com", timeout=15.0)
 
     def test_inventory_match_and_mismatch_detection(self):
         inventory = {"issuer": "CN=Issuer", "sans": ["OPS.EXAMPLE"],
@@ -97,12 +99,12 @@ class PlanTests(unittest.TestCase):
 
     @patch.dict("os.environ", {}, clear=True)
     def test_mismatch_is_structured_and_nonfatal(self):
-        live = {"commonName": "ops.vcf.example.com", "subject": "CN=ops.vcf.example.com",
-                "issuer": "CN=Lets Encrypt Staging", "sans": ["ops.vcf.example.com"],
+        live = {"commonName": "operations.example.com", "subject": "CN=operations.example.com",
+                "issuer": "CN=Lets Encrypt Staging", "sans": ["operations.example.com"],
                 "notBefore": "2026-09-01T00:00:00+00:00",
                 "notAfter": "2026-12-01T00:00:00+00:00",
                 "sha256Thumbprint": "deadbeef"}
-        result = assemble_plan("ops.vcf.example.com", ACTIVE, Settings.from_env(),
+        result = assemble_plan("operations.example.com", ACTIVE, Settings.from_env(),
                                csr_exists=False, imported_certificates=[],
                                live_certificate=live)
         self.assertFalse(result["inventoryMatchesLive"])
@@ -129,7 +131,7 @@ class PlanTests(unittest.TestCase):
         build.return_value = {"notice": "No changes have been made."}
         output = io.StringIO()
         with patch("sys.stdout", output):
-            self.assertEqual(main(["plan", "ops.vcf.example.com"]), 0)
+            self.assertEqual(main(["plan", "operations.example.com"]), 0)
         self.assertEqual(json.loads(output.getvalue())["notice"], "No changes have been made.")
         self.assertFalse(client_class.return_value.create_csr.called)
         self.assertFalse(client_class.return_value.session.put.called)
@@ -141,7 +143,7 @@ class PlanTests(unittest.TestCase):
     def test_insecure_tls_emits_one_controlled_warning(self, exchange, client_class, build):
         stdout, stderr = io.StringIO(), io.StringIO()
         with patch("sys.stdout", stdout), patch("sys.stderr", stderr):
-            self.assertEqual(main(["plan", "ops.vcf.example.com"]), 0)
+            self.assertEqual(main(["plan", "operations.example.com"]), 0)
         message = "WARNING: TLS certificate verification is disabled for VCF API connections."
         self.assertEqual(stderr.getvalue().count(message), 1)
         self.assertNotIn("InsecureRequestWarning", stderr.getvalue())

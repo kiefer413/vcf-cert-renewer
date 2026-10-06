@@ -11,7 +11,7 @@ class SignerTests(unittest.TestCase):
     def settings(self, mode="staging"):
         return Settings(
             "token", "url", True, 30, "api", acme_mode=mode,
-            acme_server=ACME_DIRECTORIES[mode], acme_email="admin@example.com",
+            acme_server=ACME_DIRECTORIES[mode], acme_email="unit@localhost",
             dns_nameserver="192.0.2.53:53", dns_tsig_key="key",
             dns_tsig_secret="top-secret", lego_path=Path("/usr/bin/lego"),
             output_dir=Path("/var/lib/vcf"))
@@ -38,6 +38,66 @@ class SignerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "DNSUPDATE_TSIG_SECRET"):
             lego_command(settings, Path("a.csr"))
 
+    def test_signer_accepts_valid_email_and_private_nameserver(self):
+        settings = self.settings()
+        settings = Settings(**{**settings.__dict__,
+                              "acme_email": "unit@localhost",
+                              "dns_nameserver": "dns01.home.arpa:53"})
+        command, _ = lego_command(settings, Path("target.csr"))
+        self.assertIn("--email", command)
+
+    def test_signer_rejects_example_email(self):
+        for email in ("admin@example.invalid", "admin@example.com", "admin@lab.test"):
+            settings = Settings(**{**self.settings().__dict__, "acme_email": email})
+            with self.subTest(email=email), self.assertRaisesRegex(
+                    ValueError, "ACME_EMAIL contains an example/placeholder"):
+                lego_command(settings, Path("target.csr"))
+
+    def test_signer_rejects_example_nameserver_but_accepts_private_ip(self):
+        for nameserver in ("ns1.example.invalid:53", "resolver.lab.test", "dns.example.org"):
+            settings = Settings(**{**self.settings().__dict__, "dns_nameserver": nameserver})
+            with self.subTest(nameserver=nameserver), self.assertRaisesRegex(
+                    ValueError, "DNSUPDATE_NAMESERVER contains an example/placeholder"):
+                lego_command(settings, Path("target.csr"))
+        settings = Settings(**{**self.settings().__dict__, "dns_nameserver": "192.0.2.53:53:53"})
+        lego_command(settings, Path("target.csr"))
+
+    def test_lego_failure_surfaces_sanitized_details_and_account_hint(self):
+        import subprocess
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from vcf_cert_renewer.signer import sign_csr
+
+        settings = self.settings()
+        settings = Settings(**{**settings.__dict__, "acme_email": "unit@localhost",
+                               "dns_tsig_secret": "tsig-sensitive",
+                               "acme_eab_kid": "kid-sensitive",
+                               "acme_eab_hmac": "hmac-sensitive"})
+        private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        csr = (x509.CertificateSigningRequestBuilder().subject_name(x509.Name([
+            x509.NameAttribute(x509.NameOID.COMMON_NAME, "vcfa.example.test")]))
+            .sign(private, hashes.SHA256()))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "target.csr"
+            path.write_bytes(csr.public_bytes(serialization.Encoding.PEM))
+            settings = Settings(**{**settings.__dict__, "output_dir": Path(directory) / "output"})
+            error = subprocess.CalledProcessError(
+                7, ["lego"], output="accountDoesNotExist :: tsig-sensitive",
+                stderr="DNS failure: hmac-sensitive\nNS1 resolution failed")
+            with patch("vcf_cert_renewer.signer.subprocess.run", side_effect=error):
+                with self.assertRaisesRegex(ValueError, "exit status 7") as caught:
+                    sign_csr(settings, path)
+        message = str(caught.exception)
+        self.assertIn("accountDoesNotExist", message)
+        self.assertIn("DNS failure", message)
+        self.assertIn("Verify the configured ACME account state", message)
+        self.assertNotIn("tsig-sensitive", message)
+        for secret in ("hmac-sensitive", "kid-sensitive", "token-sensitive",
+                       "password-sensitive", "client-sensitive", "private-material"):
+            self.assertNotIn(secret, message)
+        self.assertIn("[REDACTED]", message)
+        self.assertNotIn("BEGIN RSA PRIVATE KEY", message)
 
 if __name__ == "__main__":
     unittest.main()

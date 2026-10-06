@@ -1,4 +1,12 @@
-# Secret handling and batch containers (v1.3.1)
+# Secret handling and batch containers (v1.4.0)
+
+`.env.example` is a template only. A local `.env` is not implicitly loaded by a
+direct CLI invocation; explicitly export/source it for development if needed. Do
+not put production secrets in the repository working tree. Production can use
+exported environment, `--config`, `--secrets-file`, `*_FILE`, systemd credentials,
+container secrets or mounted Kubernetes secrets. Signing rejects reserved
+example/test ACME email and nameserver values while allowing ordinary private DNS
+names.
 
 Direct environment values and the existing secrets.env deployment remain supported.
 For production, use mounted files and NAME_FILE instead. The central resolver runs
@@ -85,9 +93,9 @@ batch command, with no scheduler. Schedule it externally. Do not run concurrent
 renewals against the same targets or state directory.
 
 ```sh
-docker build -t vcf-cert-renewer:1.3.1 .
-docker run --rm --network none vcf-cert-renewer:1.3.1 --version
-docker run --rm --network none vcf-cert-renewer:1.3.1 --help
+docker build -t vcf-cert-renewer:1.4.0 .
+docker run --rm --network none vcf-cert-renewer:1.4.0 --version
+docker run --rm --network none vcf-cert-renewer:1.4.0 --help
 ```
 
 `OUTPUT_DIR=/data` contains CSR/fullchain artifacts and lego state under
@@ -121,12 +129,12 @@ docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
   --env-file ./container.env \
   --mount type=bind,src="$(pwd)/secrets",dst=/run/secrets,readonly \
   --mount type=volume,src=vcf-renewer-data,dst=/data \
-  ghcr.io/kiefer413/vcf-cert-renewer:1.3.1 plan --all
+  ghcr.io/kiefer413/vcf-cert-renewer:1.4.0 plan --all
 ```
 
 Use `renew --all --yes` instead of `plan --all` when ready to authorize renewal.
 Planning uses network reads; only --help/--version/configuration smoke checks are
-offline. The v1.3.1 image becomes available after the separately approved release; until then, use published v1.3.0.
+offline. The v1.4.0 image becomes available after the separately approved release; until then, use published v1.3.1.
 Docker standalone `run` has no `--secret` option: the example uses read-only mounts.
 Podman supports the same image/mount approach and native secrets, for example:
 
@@ -141,7 +149,7 @@ podman run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
   --secret sddc_password,uid=10001,gid=10001,mode=0400 \
   --secret dns_tsig_secret,uid=10001,gid=10001,mode=0400 \
   -v vcf-renewer-data:/data \
-  ghcr.io/kiefer413/vcf-cert-renewer:1.3.1 plan --all
+  ghcr.io/kiefer413/vcf-cert-renewer:1.4.0 plan --all
 ```
 
 For EAB, also mount/create acme_eab_hmac and enable both EAB settings. For private
@@ -175,9 +183,9 @@ log into GHCR or publish. A protected `ghcr-release` GitHub environment should g
 publishing; configure required reviewers before pushing a release tag.
 
 Build the test-only image with
-`docker build -t vcf-cert-renewer-test:1.3.1 - < packaging/Dockerfile.test`.
+`docker build -t vcf-cert-renewer-test:1.4.0 - < packaging/Dockerfile.test`.
 Run it with `docker run --rm --network none --read-only --tmpfs /tmp:rw,size=256m
--v "$PWD:/work:ro" vcf-cert-renewer-test:1.3.1` (one command). Use a source-only
+-v "$PWD:/work:ro" vcf-cert-renewer-test:1.4.0` (one command). Use a source-only
 checkout with no production config/state mounted. The entrypoint runs
 `scripts/validate_release.sh`; it requires --network none.
 `python scripts/container_smoke.py IMAGE` validates the runtime without API calls.

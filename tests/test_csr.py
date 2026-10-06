@@ -72,19 +72,19 @@ class GenerateCsrCommandTests(unittest.TestCase):
         client = client_class.return_value
         client.query_certificates.return_value = [{
             "certificateResourceKey": "dynamic-key", "category": "TLS_CERT",
-            "applianceFqdn": "ops.vcf.example.com",
+            "applianceFqdn": "operations.example.com", "vcfEndpoint": "INTEGRATED_OPS_LCM",
             "certificateMetadata": {"certificateChainRole": "LEAF"}}]
         client.create_csr.return_value = ("request-1", {"status": "IN_PROGRESS"})
         client._state.return_value = "IN_PROGRESS"
         client.wait_for_csr.return_value = {"status": "COMPLETED"}
         client.fetch_csr.return_value = "-----BEGIN CERTIFICATE REQUEST-----\nabc\n-----END CERTIFICATE REQUEST-----\n"
         with tempfile.TemporaryDirectory() as directory:
-            self.assertEqual(main(["generate-csr", "ops.vcf.example.com", "--output", directory]), 0)
-            output = Path(directory) / "ops.vcf.example.com.csr.pem"
+            self.assertEqual(main(["generate-csr", "operations.example.com", "--output", directory]), 0)
+            output = Path(directory) / "operations.example.com.csr.pem"
             self.assertIn("BEGIN CERTIFICATE REQUEST", output.read_text())
         client.create_csr.assert_called_once_with(client.query_certificates.return_value[0])
         client.wait_for_csr.assert_called_once()
-        client.fetch_csr.assert_called_once_with("dynamic-key", "ops.vcf.example.com")
+        client.fetch_csr.assert_called_once_with("dynamic-key", "operations.example.com")
 
 
 if __name__ == "__main__":

@@ -3,14 +3,14 @@ import json
 import subprocess
 import sys
 
-image = sys.argv[1] if len(sys.argv) > 1 else 'vcf-cert-renewer:1.3.1'
+image = sys.argv[1] if len(sys.argv) > 1 else 'vcf-cert-renewer:1.4.0'
 def docker(*args):
     return subprocess.check_output(['docker', *args], text=True)
 def run(*args):
     return docker('run', '--rm', '--network', 'none', '--read-only',
                   '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
                   '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m', *args)
-assert '1.3.1' in run(image, '--version')
+assert '1.4.0' in run(image, '--version')
 assert 'renew' in run(image, '--help')
 assert '5.4.1' in run('--entrypoint', 'lego', image, '--version')
 assert '3.12.12' in run('--entrypoint', 'python', image, '--version')

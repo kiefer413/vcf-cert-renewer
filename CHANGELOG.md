@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.4.0
+
+- Add dynamically discovered VCF Automation external TLS renewal through Fleet.
+- Require fully managed External CA TLS leaf metadata; internal VMCA/runtime certificates remain non-mutable.
+- Validate CSR resource, appliance, endpoint and DNS SAN identity; ignore stale CSR history and fail on ambiguity.
+- Guard explicit Fleet CSR generation, import and replacement by adapter capability.
+- Report renewal phase and mutation outcome safely; validate signer configuration before mutation.
+- Production validation completed external TLS replacement and live HTTPS verification; subsequent targeted plan and read-only `plan --all` succeeded after the CSR fix. No later live mutating scheduled `renew --all` was run.
+- Preserve the four configured batch targets, 30-day threshold, `--force` approval behavior, and existing Operations, SDDC Manager, vCenter and NSX routes.
+
 ## v1.3.1
 
 - Official Kubernetes CronJob with persistent state, mounted secrets and hardened non-root runtime.

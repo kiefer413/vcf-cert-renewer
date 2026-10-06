@@ -2,11 +2,11 @@
 
 ## Docker / Podman and Kubernetes
 
-Use `ghcr.io/kiefer413/vcf-cert-renewer:1.3.1` (amd64/arm64). Python, dependencies
+Use `ghcr.io/kiefer413/vcf-cert-renewer:1.4.0` (amd64/arm64). Python, dependencies
 and lego are included. See the **[container deployment guide](CONTAINER_DEPLOYMENT.md)**
 for Docker/Podman/Compose installation and the official
 [Kubernetes CronJob](deploy/kubernetes/cronjob.yaml), including plan-first setup
-and mounted secrets. Until v1.3.1 is published, use the available `:1.3.0` image.
+and mounted secrets. Until v1.4.0 is published, use the available `:1.3.1` image.
 
 CA-neutral ACME v2 TLS certificate automation for VMware Cloud Foundation (VCF) 9.x.
 
@@ -29,17 +29,18 @@ VCF Certificate Renewer discovers browser-facing certificates, builds a read-onl
 
 ## Supported components
 
-Only four browser-facing endpoints are authorized for full renewal. Other known components are deliberately limited to planning, discovery, or unsupported status.
+The four configured administrative endpoints retain their existing full-renewal routes. VCF Automation adds one dynamically discovered target: only its fully managed, external CA TLS leaf can be renewed. Internal Automation VMCA/runtime certificates and other known components remain limited to planning, discovery, or unsupported status.
 
 | Component | Discovery | Plan | Renewal |
 |---|:---:|:---:|:---:|
 | VCF Operations | Yes | Yes | Yes |
+| VCF Automation external TLS leaf | Yes | Yes | Yes (fully managed External CA only) |
 | SDDC Manager | Yes | Yes | Yes |
 | vCenter Server | Yes | Yes | Yes |
 | NSX Manager cluster VIP | Yes | Yes | Yes |
 | NSX manager node/API | Yes | Yes | No |
 | Identity Broker / ACS | Yes | Yes | No |
-| Runtime / Automation / Logs | Yes | Yes | No |
+| Automation internal VMCA/runtime, Runtime, Logs | Yes | Yes | No |
 | Operations for Networks | Yes | No | No |
 | Supervisor | Yes | Yes | No |
 | ESXi | No | No | No |
@@ -71,6 +72,7 @@ Fleet inventory + live TLS inspection
 ```
 
 - Operations uses Fleet CSR, import, and replace APIs.
+- VCF Automation external TLS uses the same Fleet lifecycle after semantic inventory selection and strict resource/CSR identity checks; it does not select internal VMCA/runtime certificates.
 - SDDC Manager and vCenter use the domain resource-certificate API.
 - NSX uses the native `MGMT_CLUSTER` certificate profile for the cluster VIP.
 - The live HTTPS leaf is authoritative for renewal timing and final verification.
@@ -100,7 +102,7 @@ python -m vcf_cert_renewer discover --all
 python -m vcf_cert_renewer plan --all
 ```
 
-Start with ACME staging (`ACME_MODE=staging`). Review the plan for all four configured targets before approving any renewal. Never commit `.env` or real credentials.
+Start with ACME staging (`ACME_MODE=staging`). Review the plan for all four configured targets and any discovered eligible VCF Automation external TLS certificate before approving renewal. Never commit `.env` or real credentials.
 
 ## Production installation
 
@@ -130,7 +132,7 @@ For v1.3.0 production deployments, prefer [mounted secrets and systemd Credentia
 - TLS verification settings.
 - ACME mode and account email.
 - RFC2136 nameserver and restricted TSIG credentials.
-- Exactly four `VCF_RENEW_TARGETS`, ordered as Operations, SDDC Manager, vCenter, and NSX Manager VIP.
+- Exactly four `VCF_RENEW_TARGETS`, ordered as Operations, SDDC Manager, vCenter, and NSX Manager VIP. VCF Automation external TLS is discovered separately and is not added to that configuration list.
 - Renewal threshold, public DNS resolvers, `lego` path, and output directory.
 
 The complete documented template is [examples/vcf-cert-renewer.env.example](examples/vcf-cert-renewer.env.example). Configuration precedence is CLI override, process environment, secrets file, optional YAML, then safe built-in defaults. See [Authentication and configuration](docs/authentication.md).
@@ -171,10 +173,12 @@ python3 -m vcf_cert_renewer renew --help
 python3 -m vcf_cert_renewer discover --all
 python3 -m vcf_cert_renewer plan --all
 python3 -m vcf_cert_renewer plan ops.vcf.example.com
+python3 -m vcf_cert_renewer plan vcfa.example.com
 
 # Preview or approve renewal
 python3 -m vcf_cert_renewer renew ops.vcf.example.com
 python3 -m vcf_cert_renewer renew ops.vcf.example.com --yes
+python3 -m vcf_cert_renewer renew vcfa.example.com --yes
 python3 -m vcf_cert_renewer renew --all
 python3 -m vcf_cert_renewer renew --all --yes
 ```
@@ -184,7 +188,7 @@ python3 -m vcf_cert_renewer renew --all --yes
 ## Safety model
 
 - `discover --all` and `plan --all` are read-only.
-- Batch renewal plans every target before changing any target and fails closed if planning fails.
+- Batch renewal plans every configured target before mutation. A planning failure for an established configured target fails closed; a missing or ambiguous Automation discovery is reported separately and does not redirect or broaden other routes.
 - Production ACME renewal requires `--yes` or `--apply`.
 - `--force` changes only the expiry decision; it does not grant approval.
 - Endpoint private keys remain inside VCF or NSX.
@@ -198,12 +202,12 @@ Public issuance uses Let's Encrypt, or another compatible ACME directory, with `
 
 ## Known limitations
 
-- Full renewal is limited to the four allowlisted endpoints in the support matrix.
+- Full renewal is limited to the four configured administrative endpoints and the uniquely discovered, fully managed VCF Automation external TLS leaf.
 - NSX manager-node/API certificates are not replaced; only the cluster VIP `MGMT_CLUSTER` profile is supported.
 - ESXi certificates are outside the release scope.
 - Internal roots, intermediates, trust anchors, and private/internal certificates are not replaced.
 - Some discovered products are plan-only or discovery-only because no verified mutation route is available.
-- Full renewal has been live-validated with VCF 9.1.x only.
+- Existing component renewals and the VCF Automation external TLS replacement workflow have been live-validated with VCF 9.1.x; a later live mutating scheduled `renew --all` after Automation replacement has not been run.
 - The deployment expects network access to VCF APIs, the live HTTPS endpoints, an ACME directory, public resolvers, and the authoritative RFC2136 DNS server.
 
 ## Documentation and project policies
@@ -290,3 +294,10 @@ registration, but Pod recreation may trigger a new registration that fails due t
 registration limits, EAB requirements or custom CA rules. CronJob renewal output
 goes to stdout/container logs (`kubectl logs`), not reports under `/data`.
 See [storage and logging details](CONTAINER_DEPLOYMENT.md).
+
+
+## v1.4.0: VCF Automation external TLS
+
+VCF Automation external/browser TLS is discovered from Fleet inventory and is eligible only when it is a fully managed External CA TLS leaf. The renewal uses the product-generated CSR, the existing ACME DNS-01 flow, Fleet import/replacement and live HTTPS verification. CSR reuse requires exact current resource, appliance, endpoint and DNS SAN identity; retained historical records are ignored, and ambiguous matching records fail safely. Explicit CSR generation, import and replacement commands enforce the component capability policy.
+
+Production validation completed replacement of the discovered external TLS certificate and confirmed the live HTTPS certificate; this public documentation represents its hostname as `vcfa.example.com`. The operator reports that a subsequent targeted read-only plan and `plan --all` succeeded after the retained-CSR fix. Offline regression tests exercise subsequent `renew --all`; a later live mutating scheduled `renew --all` was not executed. Internal Automation VMCA/runtime certificates remain non-mutable. See [VCF Automation API findings](docs/vcfa.md) and [release notes](docs/releases/v1.4.0.md).

@@ -18,7 +18,7 @@ class AcmeTests(unittest.TestCase):
         return Settings.load(config_path=Path('/missing'), secrets_path=Path('/missing'), environ=env)
 
     def signer(self, **env):
-        return replace(self.load(**env), acme_email='admin@example.com',
+        return replace(self.load(**env), acme_email='unit@localhost',
                        dns_nameserver='192.0.2.53:53', dns_tsig_key='example-key',
                        dns_tsig_secret='test-tsig')
 
@@ -100,3 +100,6 @@ class AcmeTests(unittest.TestCase):
             self.assertNotIn('test-hmac', str(caught.exception))
             self.assertNotIn('test-kid', str(caught.exception))
             self.assertTrue(caught.exception.__suppress_context__)
+            self.assertIn('exit status 1', str(caught.exception))
+            self.assertIn('stdout:', str(caught.exception))
+            self.assertIn('stderr:', str(caught.exception))

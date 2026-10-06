@@ -29,7 +29,7 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn("VCF_CLIENT_SECRET", example)
         for secret in ("VCF_API_TOKEN", "SDDC_PASSWORD", "DNSUPDATE_TSIG_SECRET"):
             self.assertIn(f"{secret}=", example)
-        self.assertNotIn("example.invalid", example)
+        self.assertIn("yourdomain.tld", example)
 
     def test_timer_is_daily_persistent_and_randomized(self):
         timer = (ROOT / "packaging/systemd/vcf-cert-renewer.timer").read_text()
