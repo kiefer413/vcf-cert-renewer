@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 import warnings
@@ -20,13 +21,18 @@ from .certificates import (AmbiguousCertificateError, CertificateNotFoundError,
 from .client import VcfApiClient, WorkflowFailedError, WorkflowTimeoutError
 from .components import adapter_for, discover_inventory, plan_inventory
 from .config import ConfigurationError, Settings
+from .diagnostics import diagnostic_for_exception
 from .fullchain import build_vcf_fullchain, predictable_fullchain_path
 from .renewer import (OPERATIONS_ACTIONS, RenewalExecutionError,
                       execute_domain_renewal, execute_nsx_renewal, execute_renewal, renewal_plan)
 from .signer import sanitize_diagnostic, validate_signer_configuration
 from .nsx_client import NsxApiClient
 from .sddc_client import SddcApiClient
-from .signer import sign_csr
+from .sddc_install import InstallError, install_existing
+from .scoped_renewal import TARGETS, renew_scoped
+from .task_guard import Stop
+from . import monitoring
+from .signer import reuse_signed_csr, sign_csr
 from .importer import import_certificate_chain
 from .plan import build_domain_plan, build_plan
 from .replacer import (AmbiguousImportedCertificateError,
@@ -100,6 +106,31 @@ def _parser() -> argparse.ArgumentParser:
     sign.add_argument("target")
     sign.add_argument("--csr", type=Path)
     sign.add_argument("--build-fullchain", action="store_true")
+    sign.add_argument("--reuse-existing", action="store_true",
+                      help="validate saved certificate for the target without contacting ACME")
+    install = sub.add_parser("install", help="install an existing SDDC Manager certificate")
+    install.add_argument("fqdn")
+    install.add_argument("--existing", required=True, action="store_true")
+    phase = install.add_mutually_exclusive_group(required=True)
+    for mode in ("prepare", "apply", "status"):
+        phase.add_argument(f"--{mode}", dest="mode", action="store_const", const=mode)
+    install.add_argument("--yes", action="store_true")
+    install.add_argument("--accept-unverified-rollback", action="store_true",
+                         help="acknowledge unverified old-certificate recovery for --apply")
+
+    sub.add_parser("scheduled", help="run one explicitly configured renewal check")
+    sub.add_parser("scheduler", help="run the persistent container scheduler")
+    health = sub.add_parser("status", help="read persisted scheduler and certificate health")
+    health.add_argument("--all", action="store_true")
+    health.add_argument("--json", action="store_true")
+    monitor = sub.add_parser("watchdog", help="check scheduler health independently")
+    monitor.add_argument("--systemd", action="store_true")
+
+    scoped = sub.add_parser("renew-scoped", help="renew explicitly approved production targets")
+    scoped.add_argument("--target", action="append", choices=tuple(TARGETS), required=True)
+    scoped.add_argument("--accept-unverified-rollback", action="store_true", required=True)
+    scoped.add_argument("--poll-timeout", type=int, default=900)
+
     renew = sub.add_parser("renew", help="safely orchestrate the renewal lifecycle")
     renew.add_argument("fqdn", nargs="?")
     renew.add_argument("--all", action="store_true", dest="all_targets",
@@ -118,6 +149,8 @@ def _execute_supported_renewal(settings: Settings, fqdn: str, *,
                                poll_interval: float, poll_timeout: float,
                                certificate: dict[str, object] | None = None) -> dict[str, object]:
     """Validate route credentials and signer inputs before mutation."""
+    if settings.acme_mode == "production" and fqdn.rstrip(".").lower() in TARGETS:
+        raise ConfigurationError("Use renew-scoped with explicit recovery acknowledgement for this target.")
     adapter = adapter_for(certificate or {"applianceFqdn": fqdn})
     if adapter.capability.value != "FULL_RENEW":
         raise ValueError(f"{fqdn} is not a FULL_RENEW target: {adapter.reason}")
@@ -242,6 +275,14 @@ def _batch_renew(settings: Settings, args: argparse.Namespace) -> int:
             item.pop("notice", None)
     for plan in plans:
         fqdn = str(plan["targetFqdn"])
+        component_by_target = {
+            "ops.vcf.example.com": "VCF_OPERATIONS",
+            "sddc.vcf.example.com": "SDDC_MANAGER",
+            "vcenter.vcf.example.com": "VCENTER",
+            "nsxt.vcf.example.com": "NSX_MANAGER",
+        }
+        component = str(plan.get("componentType") or
+                        component_by_target.get(fqdn, "VCF_COMPONENT"))
         if plan["result"] == "NO_RENEWAL_NEEDED":
             results.append({"targetFqdn": fqdn, "status": "SKIPPED",
                             "reason": "NO_RENEWAL_NEEDED"})
@@ -255,9 +296,13 @@ def _batch_renew(settings: Settings, args: argparse.Namespace) -> int:
             results.append({"targetFqdn": fqdn, "status": "RENEWED",
                             "result": renewal})
         except RenewalExecutionError as exc:
+            diagnostic = diagnostic_for_exception(
+                exc.cause, component=component, target=fqdn,
+                phase=exc.phase, operation="RENEWAL_WORKFLOW")
             results.append({"targetFqdn": fqdn, "status": "FAILED",
                             "phase": exc.phase, "errorType": type(exc.cause).__name__,
                             "error": sanitize_diagnostic(exc.cause, settings),
+                            "diagnostic": diagnostic,
                             "changesAlreadyMade": list(exc.completed_mutations),
                             "mutatingChangesMade": bool(exc.completed_mutations),
                             "mutationAttempted": bool(exc.completed_mutations) or exc.mutation_outcome_unknown,
@@ -266,7 +311,10 @@ def _batch_renew(settings: Settings, args: argparse.Namespace) -> int:
                             "mutationOutcomeUnknown": exc.mutation_outcome_unknown})
         except Exception as exc:  # Keep processing independent validated targets.
             results.append({"targetFqdn": fqdn, "status": "FAILED",
-                            "phase": "RENEW", "errorType": type(exc).__name__})
+                            "phase": "RENEW", "errorType": type(exc).__name__,
+                            "diagnostic": diagnostic_for_exception(
+                                exc, component=component, target=fqdn,
+                                phase="RENEW")})
     failed = any(item["status"] == "FAILED" for item in results)
     print(json.dumps({"result": "FAILED" if failed else "SUCCESS", "mode": "BATCH",
                       "plans": plans, "summary": results, "discovery": discovery,
@@ -320,6 +368,68 @@ def main(argv: list[str] | None = None) -> int:
         settings = Settings.load(
             config_path=args.config, secrets_path=args.secrets_file,
             overrides={"RENEW_BEFORE_DAYS": args.renew_before_days})
+        if args.command in {"scheduled", "scheduler", "status", "watchdog"}:
+            if args.command == "status":
+                state = monitoring.status(settings, os.environ)
+                if args.json:
+                    print(json.dumps(state, sort_keys=True))
+                else:
+                    print("Scheduler", "healthy" if state["healthy"] else "unhealthy")
+                    print("Last completed", state.get("last_completion", "never"))
+                    for role, target in state.get("targets", {}).items():
+                        print(role, target["target"], target["status"], target.get("expires", "unknown"))
+                    for issue in state["issues"]:
+                        print(issue)
+                return int(not state["healthy"])
+            events = monitoring.Events(os.environ)
+            try:
+                if args.command == "watchdog":
+                    return monitoring.watchdog(settings, events, os.environ, timer=args.systemd)
+                if args.command == "scheduled":
+                    return monitoring.scheduled(settings, events, os.environ)
+                return monitoring.run_loop(settings, events, os.environ)
+            except Exception as exc:
+                events.emit("VCF-3300", error_code=type(exc).__name__)
+                return 1
+            finally:
+                events.close()
+        if args.command == "renew-scoped":
+            failed = False
+            for target in dict.fromkeys(args.target):
+                try:
+                    result = renew_scoped(settings, target, poll_interval=5,
+                                          poll_timeout=args.poll_timeout)
+                except (InstallError, Stop) as exc:
+                    failed = True
+                    result = {"result": "BLOCKED", "reason": str(exc)}
+                except Exception as exc:
+                    failed = True
+                    result = {"result": "FAILED", "errorType": type(exc).__name__}
+                    diagnostic = getattr(exc, "renewal_diagnostic", None)
+                    if isinstance(diagnostic, dict):
+                        for field in ("operation", "stage", "outcome", "httpStatus", "acmeCategory"):
+                            if field in diagnostic:
+                                result[field] = diagnostic[field]
+                print(json.dumps(dict(result, target=target), sort_keys=True), flush=True)
+            return int(failed)
+        if args.command == "install":
+            if args.yes != (args.mode == "apply"):
+                print("error: --yes is required for --apply only", file=sys.stderr)
+                return 2
+            if args.accept_unverified_rollback and args.mode != "apply":
+                print("error: --accept-unverified-rollback requires --apply", file=sys.stderr)
+                return 2
+            try:
+                result = install_existing(settings, args.fqdn, args.mode,
+                                          accept_unverified_rollback=args.accept_unverified_rollback)
+            except InstallError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            except Exception:
+                print("INSTALL_PREFLIGHT_OR_STATE_UNVERIFIED", file=sys.stderr)
+                return 1
+            print(json.dumps(result, sort_keys=True))
+            return int(args.mode != "status" and result["result"] not in {"INSTALLED", "ALREADY_INSTALLED"})
         if not settings.verify_tls:
             warnings.filterwarnings("ignore", category=InsecureRequestWarning,
                                     module=r"urllib3(\..*)?")
@@ -332,7 +442,8 @@ def main(argv: list[str] | None = None) -> int:
             csr_path = args.csr or (target if target.is_file() else
                                      settings.output_dir /
                                      f"{args.target.rstrip('.').lower()}.csr.pem")
-            signed = sign_csr(settings, csr_path)
+            signed = (reuse_signed_csr(settings, args.target, csr_path) if args.reuse_existing
+                      else sign_csr(settings, csr_path))
             if args.build_fullchain:
                 output = predictable_fullchain_path(
                     settings.output_dir, str(signed["fqdn"]))
@@ -520,6 +631,16 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigurationError, CertificateNotFoundError, AmbiguousCertificateError,
             ImportedCertificateNotFoundError, AmbiguousImportedCertificateError,
             TlsVerificationError, WorkflowFailedError, WorkflowTimeoutError) as exc:
+        diagnostic = getattr(exc, "renewal_diagnostic", None)
+        if isinstance(diagnostic, dict) and diagnostic.get("stage"):
+            print(json.dumps({"result": "FAILED", "diagnostic": diagnostic},
+                             sort_keys=True), file=sys.stderr)
+            return 2
         print(f"error: {exc}", file=sys.stderr); return 2
     except (requests.RequestException, OSError, ValueError) as exc:
+        diagnostic = getattr(exc, "renewal_diagnostic", None)
+        if isinstance(diagnostic, dict) and diagnostic.get("stage"):
+            print(json.dumps({"result": "FAILED", "diagnostic": diagnostic},
+                             sort_keys=True), file=sys.stderr)
+            return 1
         print(f"error: operation failed: {exc}", file=sys.stderr); return 1

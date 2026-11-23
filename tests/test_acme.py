@@ -95,11 +95,12 @@ class AcmeTests(unittest.TestCase):
             path.write_bytes(csr.public_bytes(serialization.Encoding.PEM))
             s = replace(self.signer(ACME_EAB_KID='test-kid', ACME_EAB_HMAC='test-hmac'), output_dir=Path(folder))
             error = subprocess.CalledProcessError(1, ['lego'], output='test-hmac', stderr='test-kid')
-            with patch('vcf_cert_renewer.signer.subprocess.run', side_effect=error), self.assertRaises(ValueError) as caught:
+            with patch('vcf_cert_renewer.signer.verify_lego_provider'), \
+            patch('vcf_cert_renewer.signer.subprocess.run', side_effect=error), self.assertRaises(ValueError) as caught:
                 sign_csr(s, path)
             self.assertNotIn('test-hmac', str(caught.exception))
             self.assertNotIn('test-kid', str(caught.exception))
             self.assertTrue(caught.exception.__suppress_context__)
             self.assertIn('exit status 1', str(caught.exception))
-            self.assertIn('stdout:', str(caught.exception))
-            self.assertIn('stderr:', str(caught.exception))
+            self.assertIn('category=UNKNOWN_ACME_ERROR', str(caught.exception))
+            self.assertNotIn('stderr:', str(caught.exception))

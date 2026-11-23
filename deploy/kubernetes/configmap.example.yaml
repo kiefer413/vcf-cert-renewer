@@ -12,7 +12,8 @@ data:
   VCF_VERIFY_TLS: "true"
   NSX_VERIFY_TLS: "true"
   SDDC_USERNAME: "svc-vcf-cert-renewer@example.com"
-  VCF_RENEW_TARGETS: "ops.vcf.example.com,sddc.vcf.example.com,vcenter.vcf.example.com,nsxt.vcf.example.com"
+  VCF_RENEW_TARGETS: "SDDC_MANAGER=sddc.vcf.example.com,VCENTER=vcenter.vcf.example.com,NSX=nsxt.vcf.example.com,OPERATIONS=ops.vcf.example.com,AUTOMATION=automation.vcf.example.com"
+  # Set VCF_ACCEPT_UNVERIFIED_RECOVERY to the approved role names before enabling.
   RENEW_BEFORE_DAYS: "30"
   CSR_COUNTRY: "US"
   CSR_STATE: "California"
@@ -23,7 +24,7 @@ data:
   # Staging is for a lab: renew still replaces certificates with untrusted certs.
   # Select production or an explicit trusted ACME_SERVER before live renewal.
   ACME_MODE: "staging"
-  DNS_PROVIDER: "rfc2136"
+  DNS_PROVIDER: "dnsupdate"
   DNSUPDATE_NAMESERVER: "192.0.2.53:53"
   DNSUPDATE_TSIG_KEY: "example-key"
   DNSUPDATE_TSIG_ALGORITHM: "hmac-sha256."

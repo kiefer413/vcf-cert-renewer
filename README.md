@@ -301,3 +301,16 @@ See [storage and logging details](CONTAINER_DEPLOYMENT.md).
 VCF Automation external/browser TLS is discovered from Fleet inventory and is eligible only when it is a fully managed External CA TLS leaf. The renewal uses the product-generated CSR, the existing ACME DNS-01 flow, Fleet import/replacement and live HTTPS verification. CSR reuse requires exact current resource, appliance, endpoint and DNS SAN identity; retained historical records are ignored, and ambiguous matching records fail safely. Explicit CSR generation, import and replacement commands enforce the component capability policy.
 
 Production validation completed replacement of the discovered external TLS certificate and confirmed the live HTTPS certificate; this public documentation represents its hostname as `vcfa.example.com`. The operator reports that a subsequent targeted read-only plan and `plan --all` succeeded after the retained-CSR fix. Offline regression tests exercise subsequent `renew --all`; a later live mutating scheduled `renew --all` was not executed. Internal Automation VMCA/runtime certificates remain non-mutable. See [VCF Automation API findings](docs/vcfa.md) and [release notes](docs/releases/v1.4.0.md).
+
+## v1.5.0 automation
+
+Configure exact targets and explicit unattended recovery policy using the
+[Linux installation and monitoring guide](docs/automation-monitoring.md) or
+[Docker Compose v2 guide](CONTAINER_DEPLOYMENT.md). These are alternative
+deployments. Run one scheduler per VMware environment.
+
+SDDC Manager, vCenter and NSX have completed live replacements. Operations and
+Automation are implemented and mock-tested through Fleet. Production verified
+authenticated discovery and trusted TLS for those two targets. Their live
+issuance and replacement remain unverified because their certificates were
+outside the renewal window.

@@ -3,10 +3,13 @@ from __future__ import annotations
 
 from ipaddress import ip_address
 from collections.abc import Callable
+import time
 from typing import Any
 from urllib.parse import quote
 
 import requests
+
+from .diagnostics import attach_diagnostic, make_diagnostic, safe_api_path, safe_identifier
 
 
 class NsxApiClient:
@@ -17,7 +20,11 @@ class NsxApiClient:
         self.timeout_seconds = timeout_seconds
         self._token_provider = token_provider
         self._access_token: str | None = None
+        self._target_fqdn: str | None = None
         self.session = requests.Session()
+
+    def set_target(self, fqdn: str) -> None:
+        self._target_fqdn = fqdn.rstrip(".").lower()
 
     def _token(self) -> str:
         if self._access_token is None:
@@ -30,13 +37,56 @@ class NsxApiClient:
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         headers = dict(kwargs.pop("headers", {}))
         headers["Authorization"] = f"Bearer {self._token()}"
-        response = self.session.request(method, self.base_url + path,
-                                        verify=self.verify_tls,
-                                        timeout=self.timeout_seconds,
-                                        headers=headers, **kwargs)
+        started = time.monotonic()
+        try:
+            response = self.session.request(method, self.base_url + path,
+                                            verify=self.verify_tls,
+                                            timeout=self.timeout_seconds,
+                                            headers=headers, **kwargs)
+        except requests.RequestException as exc:
+            self._attach_http_diagnostic(exc, method, path,
+                                         time.monotonic() - started)
+            raise
+        try:
+            response.raise_for_status()
+        except Exception as exc:
+            self._attach_http_diagnostic(exc, method, path,
+                                         time.monotonic() - started,
+                                         response=response)
+            raise
         # Never retry automatically: a mutating request may already have been accepted.
-        response.raise_for_status()
         return response
+
+    def _attach_http_diagnostic(self, exc: BaseException, method: str, path: str,
+                                elapsed: float,
+                                response: requests.Response | None = None) -> None:
+        route = safe_api_path(path)
+        operation = "NSX_API_REQUEST"
+        if route.endswith("/csrs") and method.upper() == "POST":
+            operation = "GENERATE_CSR"
+        elif "/csrs/{csrId}" in route:
+            operation = "IMPORT_CERTIFICATE"
+        elif "/certificates/{certificateId}" in route:
+            operation = "APPLY_MGMT_CLUSTER_CERTIFICATE"
+        elif route.endswith("/certificate-profiles") or route.endswith("/certificates"):
+            operation = "DISCOVER_CERTIFICATES"
+        elif route.endswith("/cluster/nodes") or route.endswith("/node/version"):
+            operation = "DISCOVER_NSX_CLUSTER"
+        status = getattr(response, "status_code", None) if response else None
+        correlation_id = None
+        response_headers = getattr(response, "headers", {}) if response else {}
+        for name in ("X-Request-ID", "X-Correlation-ID", "X-NSX-Request-ID"):
+            value = response_headers.get(name) if hasattr(response_headers, "get") else None
+            correlation_id = safe_identifier(value)
+            if correlation_id:
+                break
+        event = make_diagnostic(
+            component="NSX_MANAGER", target=self._target_fqdn, phase="RENEW",
+            operation=operation, exc=exc, http_method=method, api_path=path,
+            timeout_seconds=self.timeout_seconds, elapsed_seconds=elapsed,
+            response_status=status, correlation_id=correlation_id,
+            response_received=response is not None)
+        attach_diagnostic(exc, event)
 
     def version(self) -> dict[str, Any]:
         return self._request("GET", "/api/v1/node/version").json()
@@ -117,6 +167,8 @@ class NsxApiClient:
             raise ValueError("NSX CSR import did not return one certificate with a private key")
         return items[0]
 
-    def apply_mgmt_cluster(self, certificate_id: str) -> None:
-        self._request("POST", f"/api/v1/trust-management/certificates/{quote(certificate_id, safe='')}?action=apply_certificate",
-                      params={"service_type": "MGMT_CLUSTER"})
+    def apply_mgmt_cluster(self, certificate_id: str, *, allow_redirects: bool = True) -> None:
+        response = self._request("POST", f"/api/v1/trust-management/certificates/{quote(certificate_id, safe='')}?action=apply_certificate",
+                      params={"service_type": "MGMT_CLUSTER"}, allow_redirects=allow_redirects)
+        if not allow_redirects and not 200 <= response.status_code < 300:
+            raise ValueError("NSX certificate assignment did not return a success status")

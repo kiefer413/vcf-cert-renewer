@@ -1,0 +1,11 @@
+[Unit]
+Description=Check VCF Certificate Renewer heartbeat independently
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Unit=vcf-cert-renewer-watchdog.service
+
+[Install]
+WantedBy=timers.target

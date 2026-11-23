@@ -22,3 +22,14 @@ out/
 /build/
 /dist/
 *.egg-info/
+*.crt
+*.csr
+*.log
+*.jsonl
+*.bak
+*.tar.gz
+*.env
+!*.env.example
+secrets/
+backups/
+data/

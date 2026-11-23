@@ -14,9 +14,9 @@ RUN set -eu; arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
 
 FROM python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c
 LABEL org.opencontainers.image.title="VCF Certificate Renewer" \
-      org.opencontainers.image.version="1.4.0" \
+      org.opencontainers.image.version="1.5.0" \
       org.opencontainers.image.source="https://github.com/kiefer413/vcf-cert-renewer"
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 OUTPUT_DIR=/data
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 OUTPUT_DIR=/data DNS_PROVIDER=dnsupdate
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 renewer \
@@ -32,4 +32,5 @@ COPY packaging/container-entrypoint.sh /usr/local/bin/vcf-cert-renewer
 RUN chmod 0755 /usr/local/bin/vcf-cert-renewer
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/vcf-cert-renewer"]
-CMD ["--help"]
+HEALTHCHECK --interval=5m --timeout=8s --start-period=1h CMD ["python", "-m", "vcf_cert_renewer", "status", "--json"]
+CMD ["scheduler"]

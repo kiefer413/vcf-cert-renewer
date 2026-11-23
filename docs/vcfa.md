@@ -104,7 +104,7 @@ not claim that replacement occurred. If a mutating request times out before a
 response, the result marks its outcome as unknown and advises workflow inspection;
 no automatic rollback or account recreation occurs. Lego diagnostics are bounded
 and redact configured TSIG, EAB, token and password values. An
-`accountDoesNotExist` diagnostic asks the operator to inspect ACME account state.
+`ACME_ACCOUNT_ERROR` indicates that the CA reported a missing account. Inspect the configured ACME account state.
 
 Tests run in the existing test image with `--network none`, read-only repository
 mount, dropped capabilities and no host production configuration. Mutating APIs,
