@@ -79,14 +79,15 @@ def check_health(name, wanted):
         if docker("inspect", "-f", "{{.State.Status}}", name) != "running":
             raise AssertionError(docker("logs", name))
         time.sleep(0.5)
-    raise AssertionError(f"Expected {wanted} health status")
+    health = docker("inspect", "-f", "{{json .State.Health}}", name)
+    raise AssertionError(f"Expected {wanted} health status; engine reported {health}")
 
 
 def start(name, volume, mode):
     docker("run", "-d", "--name", name, "--network", "none", "--read-only",
            "--restart", "unless-stopped", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m", "--health-interval", "1s",
-           "--health-retries", "2", "--health-start-period", "0s",
+           "--health-retries", "2", "--health-start-period", "1s",
            "--mount", f"type=volume,src={volume},dst=/data",
            "-e", f"VCF_SMOKE_MODE={mode}", "-e", f"VCF_RENEW_TARGETS=NSX={TARGET}",
            "-e", "VCF_CHECK_INTERVAL_SECONDS=60",
