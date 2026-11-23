@@ -6,9 +6,7 @@ access. You do not install Python or lego on the Docker host or Kubernetes nodes
 The same GHCR image runs on amd64 and arm64, including directly in Kubernetes.
 There is no Kubernetes-specific build.
 
-This guide documents v1.4.0. Until that release is published, use the already
-published `ghcr.io/kiefer413/vcf-cert-renewer:1.4.0` in image references. The
-commands below show the v1.4.0 target tag.
+This guide targets the unpublished v1.5.0 candidate. The image defaults to `DNS_PROVIDER=dnsupdate` for bundled lego 5.4.1. Update older environment files or ConfigMaps that explicitly set `rfc2136`. The signer checks the selected provider with local lego help before invoking ACME.
 
 The program is a batch workflow: start, inspect certificates, renew those that are
 due, verify, then exit. Use a **CronJob**, not a continuously running Deployment.
@@ -37,12 +35,12 @@ ConfigMap (ordinary settings)     Secret (credentials)
 Work in a private deployment directory outside your Git checkout. Copy
 [`examples/container.env.example`](examples/container.env.example) there as
 `container.env`, then replace the example addresses, username, DNS key name and
-ACME email. Set `VCF_RENEW_TARGETS` to the four endpoint FQDNs in your installation.
+ACME email. Set `VCF_RENEW_TARGETS` to your role-to-FQDN policy, and add approved roles to `VCF_ACCEPT_UNVERIFIED_RECOVERY` only when ready.
 Keep `OUTPUT_DIR=/data`. Preserve TLS verification and configure CSR subject fields
 as needed (see [configuration](.env.example)).
 
 ```sh
-docker pull ghcr.io/kiefer413/vcf-cert-renewer:1.4.0
+docker pull ghcr.io/kiefer413/vcf-cert-renewer:1.5.0
 docker volume create vcf-renewer-data
 ```
 
@@ -77,27 +75,23 @@ docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
   --env-file ./container.env \
   --mount type=bind,src="$(pwd)/secrets",dst=/run/secrets,readonly \
   --mount type=volume,src=vcf-renewer-data,dst=/data \
-  ghcr.io/kiefer413/vcf-cert-renewer:1.4.0 plan --all
+  ghcr.io/kiefer413/vcf-cert-renewer:1.5.0 plan --all
 ```
 
-Review the plan and target scope. Before a real renewal, choose the intended
-trusted ACME CA: `ACME_MODE=production` for Let's Encrypt, or set `ACME_SERVER`
-to your CA's directory. `ACME_SERVER` takes precedence over `ACME_MODE`.
-**Staging is not a dry run:** `renew` can install untrusted staging certificates.
-Use staging renewal only in a lab. Then repeat the command with
-`renew --all --yes` instead of `plan --all`. `--yes` authorizes changes; the normal
-renewal threshold still applies (30 days by default). Do not add `--force` to a
-scheduled job. A successful inventory plan does not validate ACME issuance or DNS
-update permissions; test the complete renewal workflow in a lab first.
+Review target scope before making changes. Set `ACME_MODE=production` and configure
+the exact role-to-FQDN policy. Leave the recovery acknowledgement unset while
+checking discovery and health. Add only approved roles before running
+`scheduled` or starting the persistent `scheduler`. Test issuance and DNS
+permissions in an isolated environment before enabling unattended renewal.
 
 For an offline installation check, use `docker run --rm --network none
- ghcr.io/kiefer413/vcf-cert-renewer:1.4.0 --version` as one command.
+ ghcr.io/kiefer413/vcf-cert-renewer:1.5.0 --version` as one command.
 
 ### Podman and Compose
 
 Podman pulls the same image and supports native mounted secrets. Follow the
 [Podman commands and ownership guidance](docs/secret-handling.md#docker-and-podman),
-including the rootless UID mapping notes. There is no long-running service.
+including the rootless UID mapping notes.
 
 For Compose, place [`examples/compose.yaml`](examples/compose.yaml) beside
 `container.env` and `secrets/`, then run:
@@ -106,7 +100,7 @@ For Compose, place [`examples/compose.yaml`](examples/compose.yaml) beside
 docker compose pull
 docker compose run --rm renewer plan --all
 # After reviewing the plan and choosing the intended trusted CA:
-docker compose run --rm renewer renew --all --yes
+docker compose up -d renewer
 ```
 
 Compose uses the same files, read-only filesystem and persistent `/data` model.
@@ -251,7 +245,7 @@ kubectl -n vcf-cert-renewer logs -f job/vcf-cert-renewer-manual
 kubectl -n vcf-cert-renewer get job vcf-cert-renewer-manual
 ```
 
-This executes `renew --all --yes` and can change certificates. Investigate failures
+This executes `scheduled` and can change certificates for approved roles. Investigate failures
 before retrying: some targets may already have completed. After it succeeds,
 enable scheduling:
 
@@ -359,3 +353,65 @@ only as a separate intentional cleanup after backups and checking ownership.
 Do not use `kubectl delete -f deploy/kubernetes/` for routine uninstall.
 For Docker/Podman/Compose, keep the data volume and secret files; avoid
 `docker compose down -v` unless deliberately discarding account state.
+
+## v1.5.0 Compose scheduler
+
+Copy `examples/compose.yaml` and `examples/container.env.example` to a protected
+deployment directory. Rename the latter to `container.env`, configure exact
+roles and FQDNs, and supply mounted secret files readable by UID 10001.
+Build from the reviewed checkout and tag the image named in the Compose file
+when testing an unpublished candidate. Do not use the same targets from a Linux
+timer and a container scheduler concurrently.
+
+The Compose service runs `scheduler` immediately and every
+`VCF_CHECK_INTERVAL_SECONDS` seconds (default 86400). The same named volume at
+`/data` retains ACME material, journals and health. No log volume is needed.
+The image healthcheck reads the heartbeat and certificate state. Monitor
+container status externally. The default Compose `local` driver bounds logs
+to five 10 MiB rotations. Docker's driver can also use TCP syslog on supported
+hosts. TLS example for the Docker daemon driver:
+
+```yaml
+logging:
+  driver: syslog
+  options:
+    syslog-address: "tcp+tls://syslog.example.com:6514"
+    syslog-format: "rfc5424"
+    syslog-tls-ca-cert: "/etc/docker/certs/syslog-ca.pem"
+```
+
+The CA path in this example belongs to the Docker daemon host. If Docker
+supplies forwarding, leave application syslog disabled. See
+[automatic renewal and monitoring](docs/automation-monitoring.md) for status,
+event IDs and recovery.
+
+## Back up and restore the named data volume
+
+Identify the actual volume with `docker volume ls`. Stop the scheduler
+with `docker compose stop renewer` before backing up or restoring it.
+Backups contain ACME keys and may include other private data. Use a directory
+accessible only to the operator, and encrypt backups at rest.
+
+```bash
+umask 077
+volume=vcf-renewer_renewer-data   # Replace with the actual Compose volume.
+docker run --rm --network none -v "$volume:/data:ro" alpine tar -C /data -czf - . > renewer-data.tar.gz
+```
+
+To restore, create an empty volume, then extract a trusted archive while
+preserving numeric UID/GID 10001 and modes. Point Compose at that restored
+volume before recreating the service. Keep the original volume intact until
+health and pending operation state have been checked.
+
+```bash
+docker volume create renewer-data-restored
+docker run --rm -i --network none -v renewer-data-restored:/data alpine tar -C /data -xzpf - < renewer-data.tar.gz
+```
+
+For an upgrade, save a backup, pull or build the reviewed version, and use
+`docker compose up -d --no-deps renewer` with the same volume mapping. Preserve
+the environment and secrets. Check `docker compose ps`, `docker compose logs renewer`
+and `docker compose exec renewer vcf-cert-renewer status --all --json`.
+If stuck in an unresolved replacement, preserve the journal and reconcile the
+saved VMware task. Avoid concurrent schedulers and avoid `docker compose down -v`.
+Confirmed live validation and Fleet limitations are in the [release notes](docs/releases/v1.5.0.md).

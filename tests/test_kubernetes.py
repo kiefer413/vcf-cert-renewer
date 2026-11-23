@@ -1,22 +1,20 @@
 """Offline integration checks for the shipped configuration and batch contract."""
 from pathlib import Path
 import yaml
-import pytest
 
 from vcf_cert_renewer import __version__
+from vcf_cert_renewer.monitoring import policy
 from vcf_cert_renewer.config import DEFAULTS, SECRET_ENV_NAMES, SECRET_FILE_NAMES, Settings
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy/kubernetes"
 
 
-@pytest.mark.skipif("VCF_RENEW_TARGETS" not in DEFAULTS,
-                    reason="Manifests target the public GHCR image, not site-specific internal defaults")
 def test_manifests_and_configuration_resolve_with_mounted_credentials(tmp_path):
     docs = {p.name: yaml.safe_load(p.read_text()) for p in DEPLOY.glob("*.yaml")}
     config = docs["configmap.example.yaml"]["data"]
     supported = set(DEFAULTS) | SECRET_ENV_NAMES | SECRET_FILE_NAMES | {
-        "ACME_SERVER", "ACME_EMAIL", "DNSUPDATE_NAMESERVER", "DNSUPDATE_TSIG_KEY"}
+        "ACME_SERVER", "ACME_EMAIL", "DNSUPDATE_NAMESERVER", "DNSUPDATE_TSIG_KEY", "VCF_RENEW_TARGETS"}
     assert set(config) <= supported
     assert all(isinstance(value, str) for value in config.values())
     assert not ({"VCF_API_TOKEN", "SDDC_PASSWORD", "DNSUPDATE_TSIG_SECRET",
@@ -32,7 +30,8 @@ def test_manifests_and_configuration_resolve_with_mounted_credentials(tmp_path):
     assert settings.api_token == "dummy-mounted-value"
     assert settings.sddc_password == "dummy-mounted-value"
     assert settings.dns_tsig_secret == "dummy-mounted-value"
-    assert len(settings.renewal_targets) == 4
+    targets, authorized = policy(env)
+    assert len(targets) == 5 and not authorized
     assert settings.output_dir == Path("/data")
     assert settings.verify_tls and settings.nsx_verify_tls
     assert "dummy-mounted-value" not in repr(settings)
@@ -62,7 +61,7 @@ def test_cronjob_does_not_auto_start_retry_or_expand_mutation_scope():
     assert pod["securityContext"]["runAsUser"] == 10001
     assert pod["securityContext"]["seccompProfile"]["type"] == "RuntimeDefault"
     container = pod["containers"][0]
-    assert container["args"] == ["renew", "--all", "--yes"]
+    assert container["args"] == ["scheduled"]
     assert container["securityContext"] == {
         "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
         "capabilities": {"drop": ["ALL"]}}

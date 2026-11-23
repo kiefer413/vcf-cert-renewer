@@ -3,16 +3,17 @@ import json
 import subprocess
 import sys
 
-image = sys.argv[1] if len(sys.argv) > 1 else 'vcf-cert-renewer:1.4.0'
+image = sys.argv[1] if len(sys.argv) > 1 else 'vcf-cert-renewer:1.5.0'
 def docker(*args):
     return subprocess.check_output(['docker', *args], text=True)
 def run(*args):
     return docker('run', '--rm', '--network', 'none', '--read-only',
                   '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
                   '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m', *args)
-assert '1.4.0' in run(image, '--version')
+assert '1.5.0' in run(image, '--version')
 assert 'renew' in run(image, '--help')
 assert '5.4.1' in run('--entrypoint', 'lego', image, '--version')
+assert 'dnsupdate' in run('--entrypoint', 'lego', image, 'dnshelp', '-c', 'dnsupdate')
 assert '3.12.12' in run('--entrypoint', 'python', image, '--version')
 config = json.loads(docker('image', 'inspect', image))[0]['Config']
 assert config['User'] == '10001:10001'
@@ -24,7 +25,19 @@ code = r"""
 import os
 from pathlib import Path
 from vcf_cert_renewer.config import Settings, ConfigurationError
+from vcf_cert_renewer.signer import lego_command, verify_lego_provider
 assert os.getuid() == 10001
+assert os.environ['DNS_PROVIDER'] == 'dnsupdate'
+tsig = {
+    'DNSUPDATE_NAMESERVER': '192.0.2.53:53', 'DNSUPDATE_TSIG_KEY': 'fixture-key',
+    'DNSUPDATE_TSIG_ALGORITHM': 'hmac-sha256.', 'DNSUPDATE_TSIG_SECRET': 'ZHVtbXk=',
+}
+runtime = Settings.load(environ={**os.environ, **tsig, 'ACME_EMAIL': 'operator@localhost'})
+verify_lego_provider(runtime)
+argv, child = lego_command(runtime, Path('/tmp/fixture.csr'))
+assert argv[argv.index('--dns') + 1] == 'dnsupdate'
+assert {key: child[key] for key in tsig} == tsig
+assert 'ZHVtbXk=' not in argv
 assert Path('/etc/ssl/certs/ca-certificates.crt').stat().st_size > 0
 p = Path('/tmp/secret'); p.write_text('dummy-runtime-value\n'); p.chmod(0o600)
 s = Settings.load(environ={'VCF_API_TOKEN_FILE': str(p)})

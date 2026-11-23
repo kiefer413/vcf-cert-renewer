@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.0
+
+- Add per-target unattended renewal policy, replacement checkpoints and health state.
+- Add structured events, Linux rotation and watchdog, and optional TCP/TLS syslog.
+- Add a persistent Docker scheduler and container healthcheck.
+
 ## v1.4.0
 
 - Add dynamically discovered VCF Automation external TLS renewal through Fleet.

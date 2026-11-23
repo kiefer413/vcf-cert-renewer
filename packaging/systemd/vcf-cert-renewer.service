@@ -8,7 +8,9 @@ Type=oneshot
 User=root
 WorkingDirectory=/opt/vcf-cert-renewer
 EnvironmentFile=/etc/vcf-cert-renewer/vcf-cert-renewer.env
-ExecStart=/usr/bin/python3 -m vcf_cert_renewer renew --all --yes
+ExecStart=/usr/bin/python3 -m vcf_cert_renewer scheduled
+Environment=VCF_LOG_FILE=/var/log/vcf-cert-renewer/renewer.log
+Environment=PYTHONDONTWRITEBYTECODE=1
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

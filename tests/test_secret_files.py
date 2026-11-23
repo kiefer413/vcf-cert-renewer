@@ -128,7 +128,8 @@ def test_file_signing_failure_suppresses_all_secrets(tmp_path, caplog):
     path = tmp_path/'example.csr'; path.write_bytes(csr.public_bytes(serialization.Encoding.PEM))
     error = subprocess.CalledProcessError(1, ['lego'], output='dummy-hidden-ACME_EAB_HMAC',
                                           stderr='dummy-hidden-DNSUPDATE_TSIG_SECRET')
-    with patch('vcf_cert_renewer.signer.subprocess.run', side_effect=error), pytest.raises(ValueError) as caught:
+    with patch('vcf_cert_renewer.signer.verify_lego_provider'), \
+            patch('vcf_cert_renewer.signer.subprocess.run', side_effect=error), pytest.raises(ValueError) as caught:
         sign_csr(settings, path)
     assert 'dummy-hidden' not in str(caught.value)
     assert 'dummy-hidden' not in caplog.text

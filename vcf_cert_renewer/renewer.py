@@ -9,6 +9,7 @@ from typing import Any, Callable
 from .certificates import is_automation_external_tls, resolve_fleet_certificate
 from .client import (CsrNotFoundError, VcfApiClient, WorkflowFailedError)
 from .config import Settings
+from .diagnostics import attach_diagnostic, safe_exception_message
 from .fullchain import build_vcf_fullchain, predictable_fullchain_path
 from .importer import import_certificate_chain
 from .replacer import (inspect_https_certificate, poll_workflow,
@@ -66,32 +67,58 @@ def renewal_plan(settings: Settings, fqdn: str, *, force: bool = False,
 def execute_domain_renewal(client: SddcApiClient, settings: Settings, fqdn: str, *,
                          resource_type: str,
                          poll_interval: float = 2,
-                         poll_timeout: float = 900) -> dict[str, Any]:
-    domain_id, resource = client.resolve_context(fqdn, resource_type)
+                         poll_timeout: float = 900,
+                         operation=None) -> dict[str, Any]:
+    def stage(name: str, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        try:
+            return function(*args, **kwargs)
+        except Exception as exc:
+            existing = getattr(exc, "renewal_diagnostic", None)
+            event = dict(existing) if isinstance(existing, dict) else {}
+            event.update({
+                "component": resource_type.upper(), "targetFqdn": fqdn.rstrip(".").lower(),
+                "phase": "RENEW", "stage": name, "errorType": type(exc).__name__,
+                "safeMessage": safe_exception_message(exc),
+            })
+            event.setdefault("operation", name)
+            attach_diagnostic(exc, event)
+            raise
+
+    domain_id, resource = stage("RESOURCE_DISCOVERY", client.resolve_context, fqdn, resource_type)
     subject = {"country": settings.csr_country, "state": settings.csr_state,
                "locality": settings.csr_locality,
                "organization": settings.csr_organization,
                "organizationUnit": settings.csr_organization_unit,
                "keySize": 2048, "keyAlgorithm": "RSA"}
-    request_id, _ = client.generate_csr(domain_id, resource, subject)
-    client.wait_task(request_id, poll_interval=poll_interval,
-                     poll_timeout=poll_timeout)
-    csr = client.fetch_csr(domain_id, resource)
-    settings.output_dir.mkdir(parents=True, exist_ok=True)
+    request_id, _ = stage("CSR_GENERATION", client.generate_csr, domain_id, resource, subject)
+    stage("CSR_TASK_POLLING", client.wait_task, request_id,
+          poll_interval=poll_interval, poll_timeout=poll_timeout)
+    csr = stage("CSR_RETRIEVAL", client.fetch_csr, domain_id, resource)
+    stage("CSR_WRITE", settings.output_dir.mkdir, parents=True, exist_ok=True)
     csr_path = settings.output_dir / f"{fqdn.rstrip('.').lower()}.csr.pem"
-    csr_path.write_text(csr, encoding="ascii")
-    signed = sign_csr(settings, csr_path)
-    fullchain_path = predictable_fullchain_path(settings.output_dir, fqdn)
-    build_vcf_fullchain(Path(str(signed["leafPath"])),
-                        Path(str(signed["issuerPath"])), fullchain_path)
-    chain = fullchain_path.read_text(encoding="ascii")
-    validation = client.validate_certificate(domain_id, resource, chain,
-                                             poll_interval=poll_interval,
-                                             poll_timeout=poll_timeout)
-    task_id, task = client.replace_certificate(domain_id, resource, chain,
-                                               poll_interval=poll_interval,
-                                               poll_timeout=poll_timeout)
-    verification = verify_https_certificate(fqdn, chain.encode("ascii"))
+    stage("CSR_WRITE", csr_path.write_text, csr, encoding="ascii")
+    if operation is not None:
+        stage("CSR_IDENTITY", operation.validate_csr, csr_path)
+    signed = stage("ACME_SIGNING", sign_csr, settings, csr_path)
+
+    def construct_chain() -> tuple[Path, str]:
+        fullchain_path = predictable_fullchain_path(settings.output_dir, fqdn)
+        build_vcf_fullchain(Path(str(signed["leafPath"])),
+                            Path(str(signed["issuerPath"])), fullchain_path)
+        return fullchain_path, fullchain_path.read_text(encoding="ascii")
+
+    fullchain_path, chain = stage("CERTIFICATE_CHAIN_CONSTRUCTION", construct_chain)
+    if operation is not None:
+        chain = stage("ISSUED_CERTIFICATE", operation.validate_issued, settings, csr_path, fullchain_path)
+    validation = stage("CERTIFICATE_VALIDATION", client.validate_certificate,
+                       domain_id, resource, chain, poll_interval=poll_interval,
+                       poll_timeout=poll_timeout)
+    replace_resource = client.replace_certificate if operation is None else operation.replace_vcenter
+    task_id, task = stage("CERTIFICATE_REPLACEMENT", replace_resource,
+                          domain_id, resource, chain, poll_interval=poll_interval,
+                          poll_timeout=poll_timeout)
+    verification = stage("POST_INSTALLATION_VERIFICATION", verify_https_certificate,
+                         fqdn, chain.encode("ascii"))
     return {"result": "RENEWED", "targetFqdn": fqdn.rstrip(".").lower(),
             "domainId": domain_id, "resource": resource,
             "csrPath": str(csr_path), "fullchainPath": str(fullchain_path),
@@ -153,29 +180,71 @@ def _verify_nsx_mgmt_cluster(client: Any, fqdn: str, certificate_id: str,
 
 def execute_nsx_renewal(client: Any, settings: Settings, fqdn: str, *,
                         poll_interval: float = 10,
-                        poll_timeout: float = 300) -> dict[str, Any]:
-    client.discover(fqdn)
-    sans = client.validate_dns_sans(fqdn, [fqdn])
+                        poll_timeout: float = 300,
+                        operation=None) -> dict[str, Any]:
+    target = fqdn.rstrip(".").lower()
+    if hasattr(client, "set_target"):
+        client.set_target(target)
+
+    def stage(operation: str, function: Callable[..., Any], *args: Any,
+              **kwargs: Any) -> Any:
+        started = time.monotonic()
+        try:
+            return function(*args, **kwargs)
+        except Exception as exc:
+            current = getattr(exc, "renewal_diagnostic", None)
+            event = dict(current) if isinstance(current, dict) else {}
+            event.update({"component": "NSX_MANAGER", "targetFqdn": target,
+                          "phase": "RENEW", "operation": operation,
+                          "errorType": type(exc).__name__,
+                          "safeMessage": safe_exception_message(exc)})
+            elapsed = round(max(0.0, time.monotonic() - started), 3)
+            if "httpMethod" in event:
+                event["stageElapsedSeconds"] = elapsed
+            else:
+                event["elapsedSeconds"] = elapsed
+            attach_diagnostic(exc, event)
+            raise
+
+    stage("DISCOVER_MGMT_CLUSTER", client.discover, fqdn)
+    sans = stage("VALIDATE_VIP_DNS_IDENTITY", client.validate_dns_sans, fqdn, [fqdn])
     subject = {"country": settings.csr_country, "state": settings.csr_state,
                "locality": settings.csr_locality, "organization": settings.csr_organization,
                "organizationUnit": settings.csr_organization_unit}
-    csr = client.create_csr(fqdn, sans, subject)
-    csr_id, pem = csr.get("id"), csr.get("pem_encoded")
-    if not isinstance(csr_id, str) or not isinstance(pem, str):
-        raise ValueError("NSX CSR response lacks id or PEM")
+    csr = stage("GENERATE_CSR", client.create_csr, fqdn, sans, subject)
+
+    def unpack_csr() -> tuple[str, str]:
+        csr_id_value, pem_value = csr.get("id"), csr.get("pem_encoded")
+        if not isinstance(csr_id_value, str) or not isinstance(pem_value, str):
+            raise ValueError("NSX CSR response lacks id or PEM")
+        return csr_id_value, pem_value
+
+    csr_id, pem = stage("GENERATE_CSR", unpack_csr)
     settings.output_dir.mkdir(parents=True, exist_ok=True)
     csr_path = settings.output_dir / f"{fqdn.rstrip('.').lower()}.csr.pem"
     csr_path.write_text(pem, encoding="ascii")
-    signed = sign_csr(settings, csr_path)
+    if operation is not None:
+        stage("CSR_IDENTITY", operation.validate_csr, csr_path)
+    signed = stage("ACME_SIGNING", sign_csr, settings, csr_path)
     fullchain_path = predictable_fullchain_path(settings.output_dir, fqdn)
-    build_vcf_fullchain(Path(str(signed["leafPath"])), Path(str(signed["issuerPath"])), fullchain_path)
-    imported = client.import_csr_certificate(csr_id, fullchain_path.read_text(encoding="ascii"))
-    certificate_id = imported.get("id")
-    if not isinstance(certificate_id, str):
-        raise ValueError("NSX imported certificate lacks id")
-    client.apply_mgmt_cluster(certificate_id)
-    verification = _verify_nsx_mgmt_cluster(
-        client, fqdn, certificate_id, fullchain_path.read_bytes(),
+    stage("CERTIFICATE_CHAIN_CONSTRUCTION", build_vcf_fullchain,
+          Path(str(signed["leafPath"])), Path(str(signed["issuerPath"])), fullchain_path)
+    chain = (fullchain_path.read_text(encoding="ascii") if operation is None else
+             stage("ISSUED_CERTIFICATE", operation.validate_issued, settings, csr_path, fullchain_path))
+    imported = stage("CERTIFICATE_IMPORT", client.import_csr_certificate, csr_id, chain)
+
+    def unpack_import() -> str:
+        certificate_id_value = imported.get("id")
+        if not isinstance(certificate_id_value, str):
+            raise ValueError("NSX imported certificate lacks id")
+        return certificate_id_value
+
+    certificate_id = stage("CERTIFICATE_IMPORT", unpack_import)
+    apply_cluster = client.apply_mgmt_cluster if operation is None else operation.apply_nsx
+    stage("APPLY_MGMT_CLUSTER_CERTIFICATE", apply_cluster, certificate_id)
+    verification = stage(
+        "POST_INSTALLATION_VERIFICATION", _verify_nsx_mgmt_cluster,
+        client, fqdn, certificate_id, chain.encode("ascii"),
         poll_interval=poll_interval, poll_timeout=poll_timeout)
     live_thumbprint = str(verification["liveHttpsCertificate"]["sha256_thumbprint"])
     return {"result": "RENEWED", "targetFqdn": fqdn.rstrip(".").lower(),
@@ -206,7 +275,7 @@ class RenewalExecutionError(RuntimeError):
 
 def execute_renewal(client: VcfApiClient, settings: Settings, fqdn: str, *,
                     poll_interval: float = 2, poll_timeout: float = 900,
-                    certificate: dict[str, Any] | None = None) -> dict[str, Any]:
+                    certificate: dict[str, Any] | None = None, operation=None) -> dict[str, Any]:
     """Run the Fleet flow, safely reuse a matching Automation CSR and track mutations."""
     phase = "Fleet certificate discovery"
     completed_mutations: list[str] = []
@@ -265,12 +334,19 @@ def execute_renewal(client: VcfApiClient, settings: Settings, fqdn: str, *,
         settings.output_dir.mkdir(parents=True, exist_ok=True)
         csr_path = settings.output_dir / f"{fqdn.rstrip('.').lower()}.csr.pem"
         csr_path.write_text(csr, encoding="ascii")
+        if operation is not None:
+            phase = "CSR identity validation"
+            operation.validate_csr(csr_path)
         phase = "ACME signing"
         signed = sign_csr(settings, csr_path)
         phase = "certificate chain construction"
         fullchain_path = predictable_fullchain_path(settings.output_dir, fqdn)
         build_vcf_fullchain(Path(str(signed["leafPath"])),
                             Path(str(signed["issuerPath"])), fullchain_path)
+        replacement_chain = None
+        if operation is not None:
+            phase = "issued certificate validation"
+            replacement_chain = operation.validate_issued(settings, csr_path, fullchain_path).encode("ascii")
         phase = "Fleet certificate import"
         imported = import_certificate_chain(
             client, fullchain_path.read_bytes(), fqdn,
@@ -279,17 +355,28 @@ def execute_renewal(client: VcfApiClient, settings: Settings, fqdn: str, *,
         mutation_outcome_unknown = False
         completed_mutations.append("Signed certificate imported into Fleet")
         phase = "Fleet certificate replacement request"
+        def start_replacement():
+            if operation is not None:
+                operation.start_fleet()
+            mark_mutation_attempted()
+
         replace_request, replace_initial, chain = replace_certificate(
             client, fqdn, thumbprint=str(signed["sha256Thumbprint"]),
-            search_paths=[fullchain_path], on_mutation_attempt=mark_mutation_attempted,
+            search_paths=[fullchain_path], on_mutation_attempt=start_replacement,
+            **({"allow_redirects": False, "expected_chain": replacement_chain}
+               if operation is not None else {}),
             **selected)
         mutation_outcome_unknown = False
         replacement_requested = True
         completed_mutations.append("Fleet certificate replacement requested")
         workflow = replace_initial
-        if client._state(replace_initial) in {"FAILED", "ERROR", "CANCELLED", "CANCELED", "ABORTED"}:
+        if operation is not None:
+            phase = "Fleet replacement workflow"
+            workflow = operation.track_fleet(replace_request, replace_initial,
+                                             poll_interval=poll_interval, poll_timeout=poll_timeout)
+        elif client._state(replace_initial) in {"FAILED", "ERROR", "CANCELLED", "CANCELED", "ABORTED"}:
             raise WorkflowFailedError("Fleet certificate replacement failed")
-        if client._state(replace_initial) not in SUCCESS_STATES:
+        if operation is None and client._state(replace_initial) not in SUCCESS_STATES:
             phase = "Fleet replacement workflow"
             workflow = poll_workflow(client, replace_request,
                                      poll_interval=poll_interval,

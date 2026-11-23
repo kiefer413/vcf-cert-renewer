@@ -154,7 +154,9 @@ def replace_certificate(client: VcfApiClient, fqdn: str, *,
                         common_name: str | None = None,
                         search_paths: Iterable[Path] = (),
                         expected_certificate: dict[str, Any] | None = None,
-                        on_mutation_attempt: Callable[[], None] | None = None
+                        on_mutation_attempt: Callable[[], None] | None = None,
+                        allow_redirects: bool = True,
+                        expected_chain: bytes | None = None
                         ) -> tuple[str, dict[str, Any], bytes]:
     """Start the documented Fleet replace workflow. This function performs the PUT."""
     active = resolve_fleet_certificate(client.query_certificates(), fqdn,
@@ -167,6 +169,12 @@ def replace_certificate(client: VcfApiClient, fqdn: str, *,
         common_name=common_name or (None if thumbprint else fqdn))
     chain = certificate_chain_from_import(imported, search_paths=search_paths)
     certificates, info = parse_certificate_chain(chain)
+    if expected_chain is not None:
+        expected, _ = parse_certificate_chain(expected_chain)
+        if [c.fingerprint(hashes.SHA256()) for c in certificates] != [
+                c.fingerprint(hashes.SHA256()) for c in expected]:
+            raise ValueError("Fleet replacement chain differs from validated chain")
+        chain = expected_chain
     wanted = fqdn.rstrip(".").lower()
     names = {name.rstrip(".").lower() for name in info.dns_names}
     if info.common_name:
@@ -181,7 +189,10 @@ def replace_certificate(client: VcfApiClient, fqdn: str, *,
     response = client._request(
         "PUT",
         f"/suite-api/api/fleet-management/certificate-management/certificates/{certificate_id}",
-        json={"caType": "EXTERNAL_CA", "certificateChain": chain.decode("ascii")})
+        json={"caType": "EXTERNAL_CA", "certificateChain": chain.decode("ascii")},
+        **({"allow_redirects": False} if not allow_redirects else {}))
+    if not allow_redirects and not 200 <= response.status_code < 300:
+        raise ValueError("Fleet replacement did not return a success status")
     payload = response.json()
     if not isinstance(payload, dict):
         raise ValueError("replace response was not a JSON object")

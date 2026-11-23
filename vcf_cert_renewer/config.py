@@ -245,6 +245,10 @@ class Settings:
         resolvers = tuple(str(item).strip() for item in resolver_values
                           if str(item).strip())
         target_source = values["VCF_RENEW_TARGETS"]
+        # Role assignments are consumed separately by the scheduled command.
+        # Preserve the public v1.4.0 FQDN list for legacy batch callers.
+        if isinstance(target_source, str) and "=" in target_source:
+            target_source = DEFAULTS["VCF_RENEW_TARGETS"]
         target_values = (target_source if isinstance(target_source, list)
                          else str(target_source).split(","))
         renewal_targets = tuple(str(item).strip().rstrip(".").lower()

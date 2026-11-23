@@ -33,9 +33,9 @@ spec:
               type: RuntimeDefault
           containers:
             - name: renewer
-              image: ghcr.io/kiefer413/vcf-cert-renewer:1.4.0
+              image: ghcr.io/kiefer413/vcf-cert-renewer:1.5.0
               imagePullPolicy: IfNotPresent
-              args: ["renew", "--all", "--yes"]
+              args: ["scheduled"]
               envFrom:
                 - configMapRef:
                     name: vcf-cert-renewer

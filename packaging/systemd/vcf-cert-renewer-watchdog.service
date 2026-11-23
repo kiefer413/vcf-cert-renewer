@@ -1,0 +1,15 @@
+[Unit]
+Description=VCF Certificate Renewer independent health check
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/vcf-cert-renewer
+EnvironmentFile=/etc/vcf-cert-renewer/vcf-cert-renewer.env
+Environment=VCF_LOG_FILE=/var/log/vcf-cert-renewer/renewer.log
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m vcf_cert_renewer watchdog --systemd
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true

@@ -51,7 +51,7 @@ class RenewalTests(unittest.TestCase):
 
     def test_systemd_sample_never_forces_and_does_not_embed_secrets(self):
         service = Path("packaging/systemd/vcf-cert-renewer.service").read_text()
-        self.assertIn("renew --all --yes", service)
+        self.assertIn("scheduled", service)
         self.assertNotIn("--force", service)
         self.assertIn("EnvironmentFile=", service)
         self.assertNotIn("VCF_API_TOKEN=", service)

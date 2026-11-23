@@ -1,8 +1,15 @@
 services:
   renewer:
-    image: ghcr.io/kiefer413/vcf-cert-renewer:1.4.0
+    image: ghcr.io/kiefer413/vcf-cert-renewer:1.5.0
     env_file: ./container.env
-    command: ["plan", "--all"]
+    command: ["scheduler"]
+    restart: unless-stopped
+    stop_grace_period: 20m
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
     user: "10001:10001"
     read_only: true
     cap_drop: [ALL]
@@ -15,7 +22,6 @@ services:
       - vcf_api_token
       - sddc_password
       - dns_tsig_secret
-    # No restart policy: this is a batch job.
 secrets:
   vcf_api_token:
     file: ./secrets/vcf_api_token

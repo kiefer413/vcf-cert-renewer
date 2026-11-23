@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import time
+import re
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
 from .client import VcfRequestError, WorkflowFailedError, WorkflowTimeoutError
+from .diagnostics import (attach_diagnostic, make_diagnostic, safe_api_path,
+                          safe_identifier)
 
 SUCCESS = {"SUCCESSFUL", "SUCCESS", "COMPLETED"}
 FAILURE = {"FAILED", "CANCELLED", "CANCELED", "TIMED_OUT",
@@ -23,6 +27,9 @@ class SddcApiClient:
         self._password = password
         self._access_token: str | None = None
         self._refresh_metadata: dict[str, Any] = {}
+        self._target_fqdn: str | None = None
+        self._component = "SDDC_MANAGER"
+        self._last_request_context: dict[str, Any] | None = None
         self.session = requests.Session()
         self.session.headers.update({"Accept": "application/json",
                                      "Content-Type": "application/json"})
@@ -33,20 +40,135 @@ class SddcApiClient:
                 text = text.replace(secret, "[REDACTED]")
         return text
 
+    def set_target(self, fqdn: str, component: str) -> None:
+        """Set non-secret context used in subsequent failure diagnostics."""
+        self._target_fqdn = fqdn.rstrip(".").lower()
+        self._component = component.upper()
+
+    @staticmethod
+    def _operation(method: str, path: str) -> str:
+        route = urlsplit(path).path
+        method = method.upper()
+        if route == "/v1/tokens": return "AUTHENTICATE"
+        if route == "/v1/domains": return "LIST_DOMAINS"
+        if route == "/v1/sddc-managers": return "LIST_SDDC_MANAGERS"
+        if route == "/v1/vcenters": return "LIST_VCENTERS"
+        if route == "/v1/nsxt-clusters": return "LIST_NSXT_CLUSTERS"
+        if re.fullmatch(r"/v1/domains/[^/]+/csrs", route):
+            return "CREATE_CSR" if method == "PUT" else "FETCH_CSR"
+        if re.fullmatch(r"/v1/tasks/[^/]+", route): return "POLL_TASK"
+        if route.endswith("/resource-certificates/validations"):
+            return "VALIDATE_CERTIFICATE"
+        if "/resource-certificates/validations/" in route:
+            return "POLL_CERTIFICATE_VALIDATION"
+        if route.endswith("/resource-certificates"):
+            return "REPLACE_CERTIFICATE"
+        return "SDDC_API_REQUEST"
+
+    @staticmethod
+    def _identifier_from_path(path: str, prefix: str) -> str | None:
+        route = urlsplit(path).path
+        if route.startswith(prefix):
+            return safe_identifier(route[len(prefix):].split("/", 1)[0])
+        return None
+
+    def _request_context(self, method: str, path: str, *, elapsed: float,
+                         response: requests.Response | None = None,
+                         response_received: bool = False) -> dict[str, Any]:
+        status = getattr(response, "status_code", None) if response else None
+        headers = getattr(response, "headers", {}) if response else {}
+        correlation = None
+        for header in ("X-Request-ID", "X-Correlation-ID", "X-VCF-Request-ID"):
+            value = headers.get(header) if hasattr(headers, "get") else None
+            correlation = safe_identifier(value)
+            if correlation:
+                break
+        event: dict[str, Any] = {
+            "component": self._component,
+            "phase": "RENEW",
+            "operation": self._operation(method, path),
+            "targetFqdn": self._target_fqdn,
+            "httpMethod": method.upper(),
+            "apiPath": safe_api_path(path),
+            "timeoutSeconds": self.timeout_seconds,
+            "elapsedSeconds": round(max(0.0, elapsed), 3),
+            "httpStatus": status,
+            "responseReceived": response_received,
+            "taskId": self._identifier_from_path(path, "/v1/tasks/"),
+            "correlationId": correlation,
+        }
+        return {key: value for key, value in event.items() if value is not None}
+
+    def _attach_request_failure(self, exc: BaseException, context: dict[str, Any]) -> None:
+        event = dict(context)
+        event["errorType"] = type(exc).__name__
+        event["safeMessage"] = self._safe_message(exc)
+        response_received = bool(event.pop("responseReceived", False))
+        operation = event.get("operation")
+        mutation_operations = {"CREATE_CSR", "VALIDATE_CERTIFICATE", "REPLACE_CERTIFICATE"}
+        if not response_received and operation in mutation_operations:
+            event["outcome"] = ("REQUEST_NOT_SENT" if isinstance(exc, requests.ConnectTimeout)
+                                else "UNKNOWN_SERVER_OUTCOME")
+        elif response_received:
+            event["outcome"] = "HTTP_RESPONSE_RECEIVED"
+        elif event.get("httpMethod") in {"GET", "HEAD"}:
+            event["outcome"] = "READ_REQUEST_FAILED"
+        else:
+            event["outcome"] = "REQUEST_FAILED"
+        attach_diagnostic(exc, event)
+
+    @staticmethod
+    def _safe_message(exc: BaseException) -> str:
+        from .diagnostics import safe_exception_message
+        return safe_exception_message(exc)
+
+    def _remember_response_error(self, exc: BaseException) -> None:
+        if self._last_request_context:
+            self._attach_request_failure(exc, self._last_request_context)
+
+    def _json(self, response: requests.Response) -> Any:
+        try:
+            return response.json()
+        except Exception as exc:
+            self._remember_response_error(exc)
+            raise
+
+    def _elements_from_response(self, response: requests.Response) -> list[dict[str, Any]]:
+        try:
+            return self._elements(self._json(response))
+        except Exception as exc:
+            self._remember_response_error(exc)
+            raise
+
     def _authenticate(self) -> str:
         if self._access_token:
             return self._access_token
-        response = self.session.request(
-            "POST", self.base_url + "/v1/tokens", timeout=self.timeout_seconds,
-            verify=self.verify_tls,
-            json={"username": self.username, "password": self._password})
+        started = time.monotonic()
+        try:
+            response = self.session.request(
+                "POST", self.base_url + "/v1/tokens", timeout=self.timeout_seconds,
+                verify=self.verify_tls,
+                json={"username": self.username, "password": self._password})
+        except requests.RequestException as exc:
+            context = self._request_context("POST", "/v1/tokens",
+                                            elapsed=time.monotonic() - started)
+            self._attach_request_failure(exc, context)
+            raise
+        self._last_request_context = self._request_context(
+            "POST", "/v1/tokens", elapsed=time.monotonic() - started,
+            response=response, response_received=True)
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
-            raise VcfRequestError(
-                f"SDDC Manager authentication failed: {self._redact(str(exc))}",
-                response=response) from exc
-        payload = response.json()
+            wrapped = VcfRequestError(
+                f"SDDC Manager authentication returned HTTP {response.status_code}",
+                response=response)
+            self._attach_request_failure(wrapped, self._last_request_context)
+            raise wrapped from exc
+        try:
+            payload = self._json(response)
+        except Exception:
+            raise
         token = payload.get("accessToken") if isinstance(payload, dict) else None
         if not isinstance(token, str) or not token:
             raise ValueError("SDDC Manager authentication response did not contain accessToken")
@@ -62,18 +184,30 @@ class SddcApiClient:
         token = self._authenticate()
         headers = dict(kwargs.pop("headers", {}))
         headers["Authorization"] = f"Bearer {token}"
-        response = self.session.request(method, self.base_url + path,
-                                        timeout=self.timeout_seconds,
-                                        verify=self.verify_tls, headers=headers, **kwargs)
+        started = time.monotonic()
+        try:
+            response = self.session.request(method, self.base_url + path,
+                                            timeout=self.timeout_seconds,
+                                            verify=self.verify_tls, headers=headers, **kwargs)
+        except requests.RequestException as exc:
+            context = self._request_context(method, path,
+                                            elapsed=time.monotonic() - started)
+            self._attach_request_failure(exc, context)
+            raise
+        self._last_request_context = self._request_context(
+            method, path, elapsed=time.monotonic() - started,
+            response=response, response_received=True)
         if response.status_code == 401 and method.upper() in {"GET", "HEAD"} and not _retried:
             self._access_token = None
             return self._request(method, path, _retried=True, **kwargs)
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
-            detail = self._redact(response.text.strip()[:2000])
-            raise VcfRequestError(f"{exc}; SDDC Manager response: {detail}",
-                                  response=response) from exc
+            wrapped = VcfRequestError(
+                f"SDDC Manager API returned HTTP {response.status_code}",
+                response=response)
+            self._attach_request_failure(wrapped, self._last_request_context)
+            raise wrapped from exc
         return response
 
     @staticmethod
@@ -87,11 +221,12 @@ class SddcApiClient:
     def resolve_context(self, fqdn: str,
                         resource_type: str = "SDDC_MANAGER") -> tuple[str, dict[str, Any]]:
         resource_type = resource_type.upper()
+        self.set_target(fqdn, resource_type)
         endpoints = {"SDDC_MANAGER": "/v1/sddc-managers",
                      "VCENTER": "/v1/vcenters"}
         if resource_type not in {*endpoints, "NSXT_MANAGER"}:
             raise ValueError(f"unsupported domain-managed resource type: {resource_type}")
-        domains = self._elements(self._request("GET", "/v1/domains").json())
+        domains = self._elements_from_response(self._request("GET", "/v1/domains"))
         management = [d for d in domains if str(d.get("type", "")).upper() == "MANAGEMENT"]
         if len(management) != 1:
             raise ValueError(f"expected one management domain, found {len(management)}")
@@ -102,8 +237,8 @@ class SddcApiClient:
             return domain_id, self._resolve_nsxt_resource(domain_id, fqdn)
         kwargs = ({"params": {"domainId": domain_id}}
                   if resource_type == "VCENTER" else {})
-        managers = self._elements(
-            self._request("GET", endpoints[resource_type], **kwargs).json())
+        managers = self._elements_from_response(
+            self._request("GET", endpoints[resource_type], **kwargs))
         wanted = fqdn.rstrip(".").lower()
         matches = [m for m in managers if str(m.get("fqdn", "")).rstrip(".").lower() == wanted]
         if len(matches) != 1:
@@ -126,7 +261,7 @@ class SddcApiClient:
 
     def _resolve_nsxt_resource(self, domain_id: str, fqdn: str) -> dict[str, Any]:
         """Resolve an official NSX-T VIP or manager-node certificate resource."""
-        clusters = self._elements(self._request("GET", "/v1/nsxt-clusters").json())
+        clusters = self._elements_from_response(self._request("GET", "/v1/nsxt-clusters"))
         wanted = fqdn.rstrip(".").casefold()
         candidates: list[dict[str, Any]] = []
         for cluster in clusters:
@@ -149,8 +284,8 @@ class SddcApiClient:
         if len(candidates) != 1:
             raise ValueError(
                 f"expected one NSXT_MANAGER VIP/node resource for {fqdn}, found {len(candidates)}")
-        certificates = self._elements(self._request(
-            "GET", f"/v1/domains/{domain_id}/resource-certificates").json())
+        certificates = self._elements_from_response(self._request(
+            "GET", f"/v1/domains/{domain_id}/resource-certificates"))
         metadata = [item for item in certificates
                     if str(item.get("resourceType", "")).upper() == "NSXT_MANAGER"
                     and str(item.get("resourceName") or item.get("issuedTo") or "")
@@ -187,16 +322,28 @@ class SddcApiClient:
                   poll_timeout: float = 900) -> dict[str, Any]:
         deadline = time.monotonic() + poll_timeout
         while True:
-            payload = self._request("GET", f"/v1/tasks/{task_id}").json()
+            response = self._request("GET", f"/v1/tasks/{task_id}")
+            payload = self._json(response)
             if not isinstance(payload, dict):
                 raise ValueError("task response was not an object")
             state = str(payload.get("status", "")).upper().replace(" ", "_")
             if state in SUCCESS:
                 return payload
             if state in FAILURE:
-                raise WorkflowFailedError(f"SDDC Manager task {task_id} ended with {state}")
+                exc = WorkflowFailedError("SDDC Manager task reported a terminal failure.")
+                if self._last_request_context:
+                    context = dict(self._last_request_context)
+                    context["taskId"] = task_id
+                    self._attach_request_failure(exc, context)
+                raise exc
             if time.monotonic() >= deadline:
-                raise WorkflowTimeoutError(f"SDDC Manager task {task_id} timed out")
+                exc = WorkflowTimeoutError("SDDC Manager task polling timed out")
+                if self._last_request_context:
+                    context = dict(self._last_request_context)
+                    context["taskId"] = task_id
+                    self._attach_request_failure(exc, context)
+                    exc.renewal_diagnostic["outcome"] = "TASK_STATE_UNKNOWN"
+                raise exc
             time.sleep(poll_interval)
 
     def generate_csr(self, domain_id: str, resource: dict[str, Any],
@@ -207,10 +354,14 @@ class SddcApiClient:
         response = self._request("PUT", f"/v1/domains/{domain_id}/csrs",
                                  json={"csrGenerationSpec": spec,
                                        "resources": [resource]})
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise ValueError("CSR task response was not an object")
-        return self._task_id(payload, response), payload
+        try:
+            payload = self._json(response)
+            if not isinstance(payload, dict):
+                raise ValueError("CSR task response was not an object")
+            return self._task_id(payload, response), payload
+        except Exception as exc:
+            self._remember_response_error(exc)
+            raise
 
     @staticmethod
     def _csr_matches(record: dict[str, Any], resource: dict[str, Any]) -> bool:
@@ -234,8 +385,8 @@ class SddcApiClient:
         """Fetch the generated CSR, allowing bounded read-after-task propagation."""
         deadline = time.monotonic() + retry_timeout
         while True:
-            records = self._elements(
-                self._request("GET", f"/v1/domains/{domain_id}/csrs").json())
+            records = self._elements_from_response(
+                self._request("GET", f"/v1/domains/{domain_id}/csrs"))
             matches = [record for record in records
                        if self._csr_matches(record, resource)]
             if len(matches) > 1:
@@ -274,16 +425,26 @@ class SddcApiClient:
                              poll_timeout: float = 300) -> dict[str, Any]:
         response = self._request("PUT", f"/v1/domains/{domain_id}/resource-certificates/validations",
                                  json=self.certificate_spec(resource, chain))
-        payload = response.json()
-        validation_id = payload.get("validationId") if isinstance(payload, dict) else None
-        if not isinstance(validation_id, str) or not validation_id:
-            raise ValueError("validation response did not contain validationId")
+        try:
+            payload = self._json(response)
+            validation_id = payload.get("validationId") if isinstance(payload, dict) else None
+            if not isinstance(validation_id, str) or not validation_id:
+                raise ValueError("validation response did not contain validationId")
+        except Exception as exc:
+            self._remember_response_error(exc)
+            raise
         deadline = time.monotonic() + poll_timeout
         while not self._validation_done(payload):
             if time.monotonic() >= deadline:
-                raise WorkflowTimeoutError("SDDC Manager certificate validation timed out")
+                exc = WorkflowTimeoutError("SDDC Manager certificate validation polling timed out")
+                if self._last_request_context:
+                    context = dict(self._last_request_context)
+                    self._attach_request_failure(exc, context)
+                    exc.renewal_diagnostic["outcome"] = "TASK_STATE_UNKNOWN"
+                raise exc
             time.sleep(poll_interval)
-            payload = self._request("GET", f"/v1/domains/{domain_id}/resource-certificates/validations/{validation_id}").json()
+            payload = self._json(self._request(
+                "GET", f"/v1/domains/{domain_id}/resource-certificates/validations/{validation_id}"))
             if not isinstance(payload, dict):
                 raise ValueError("validation status response was not an object")
         return payload
@@ -291,12 +452,29 @@ class SddcApiClient:
     def replace_certificate(self, domain_id: str, resource: dict[str, Any], chain: str,
                             *, poll_interval: float = 2,
                             poll_timeout: float = 900) -> tuple[str, dict[str, Any]]:
-        response = self._request("PUT", f"/v1/domains/{domain_id}/resource-certificates",
-                                 json=self.certificate_spec(resource, chain))
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise ValueError("replacement task response was not an object")
-        task_id = self._task_id(payload, response)
+        task_id, payload = self.submit_certificate_replacement(domain_id, resource, chain)
         state = str(payload.get("status", "")).upper().replace(" ", "_")
         return task_id, payload if state in SUCCESS else self.wait_task(
             task_id, poll_interval=poll_interval, poll_timeout=poll_timeout)
+
+    def submit_certificate_replacement(self, domain_id: str, resource: dict[str, Any],
+                                       chain: str, *, allow_redirects: bool = True) -> tuple[str, dict[str, Any]]:
+        """Submit once and return its identifier before polling."""
+        response = self._request("PUT", f"/v1/domains/{domain_id}/resource-certificates",
+                                 json=self.certificate_spec(resource, chain), allow_redirects=allow_redirects)
+        try:
+            if not allow_redirects and not 200 <= response.status_code < 300:
+                raise ValueError("replacement response was not a success status")
+            payload = self._json(response)
+            if not isinstance(payload, dict):
+                raise ValueError("replacement task response was not an object")
+            task_id = self._task_id(payload, response)
+        except Exception as exc:
+            self._remember_response_error(exc)
+            raise
+        return task_id, payload
+
+
+    def task_inventory_page(self, page: int, size: int) -> Any:
+        return self._json(self._request("GET", "/v1/tasks",
+                                        params={"pageNumber": page, "pageSize": size}))

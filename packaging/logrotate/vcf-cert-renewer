@@ -1,0 +1,10 @@
+/var/log/vcf-cert-renewer/renewer.log {
+    daily
+    maxsize 50M
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 root root
+}
