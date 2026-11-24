@@ -12,15 +12,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PackagingTests(unittest.TestCase):
     def test_package_cli_and_container_metadata_versions_match(self):
-        self.assertEqual(__version__, "1.5.0")
+        self.assertEqual(__version__, "1.5.1")
         output = StringIO()
         with patch("sys.stdout", output):
             with self.assertRaises(SystemExit) as raised:
                 main(["--version"])
         self.assertEqual(raised.exception.code, 0)
-        self.assertEqual(output.getvalue().strip(), "vcf-cert-renewer 1.5.0")
+        self.assertEqual(output.getvalue().strip(), "vcf-cert-renewer 1.5.1")
         dockerfile = (ROOT / "Dockerfile").read_text()
-        self.assertIn('org.opencontainers.image.version="1.5.0"', dockerfile)
+        self.assertIn('org.opencontainers.image.version="1.5.1"', dockerfile)
 
     def test_batch_scope_is_exactly_v1_targets(self):
         self.assertEqual(BATCH_TARGETS, (

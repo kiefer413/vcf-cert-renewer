@@ -124,3 +124,52 @@ does not send an alert.
   appliance private key nor asserts that the old certificate can be restored.
 - A certificate that already fails trusted TLS validation requires appliance
   recovery before the automated path can verify the live identity.
+
+## Software update notifications
+
+After certificate processing, the shared Linux and Docker scheduler checks
+[the public GitHub Release API](https://api.github.com/repos/kiefer413/vcf-cert-renewer/releases/latest).
+No account is needed. The check sends an application version in the User-Agent,
+and sends an ETag for conditional stable-channel checks when available. It sends
+no VMware, ACME, certificate, endpoint or DNS data. Networks that permit outbound
+HTTPS can allow `api.github.com:443`. There is no telemetry service or automatic installer.
+
+| Environment setting | Default | Allowed values |
+|---|---|---|
+| `UPDATE_CHECK_ENABLED` | true | true, false |
+| `UPDATE_CHECK_INTERVAL_HOURS` | 24 | Integer 1–720 |
+| `UPDATE_CHECK_TIMEOUT_SECONDS` | 10 | Integer 1–30 |
+| `UPDATE_CHECK_INCLUDE_PRERELEASE` | false | true, false |
+
+For Linux set these optionally in the protected service environment file. For Docker
+add them to `container.env`. Invalid optional values report a warning and leave
+certificate processing functional. Prerelease opt-in queries the releases list,
+ignores drafts and uses semantic version ordering. The scan is bounded to five
+pages and fails safely rather than selecting from an incomplete result.
+
+`status --all --json` adds `software_update`, including cached and last-check
+status. Reading status never contacts GitHub. `check-update [--json]` checks
+immediately while respecting disabled policy. It returns 0 for a successful or
+disabled check, including an available update, and 1 for a failed check. In JSON
+mode structured log events go to stderr unless a logfile is configured.
+Existing certificate health and exit codes are unaffected by update availability
+or a GitHub outage.
+
+The cache is in `.software-update/state.json` under the configured output path
+and persists across restart. Keep that directory when upgrading or recreating
+containers. A failed check preserves the last release information and flags it
+as potentially stale. Warnings only repeat if the failure type changes. Check
+DNS, outbound trust and GitHub rate limits if the failure persists.
+
+| Event | Meaning |
+|---|---|
+| VCF-6000 | A newly discovered update is available |
+| VCF-6010 | The installed version is up to date |
+| VCF-6020 | The version check failed |
+| VCF-6030 | A version check recovered |
+
+Linux operators should back up and verify the new runtime separately while
+preserving the existing environment, ACME material, certificates, operation
+journals, health, notification history and logging settings. Docker operators
+should select an explicit version tag and follow the container upgrade procedure
+without deleting the data volume. Software updates always require an operator.

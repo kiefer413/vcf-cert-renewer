@@ -6,7 +6,7 @@ access. You do not install Python or lego on the Docker host or Kubernetes nodes
 The same GHCR image runs on amd64 and arm64, including directly in Kubernetes.
 There is no Kubernetes-specific build.
 
-This guide targets the unpublished v1.5.0 candidate. The image defaults to `DNS_PROVIDER=dnsupdate` for bundled lego 5.4.1. Update older environment files or ConfigMaps that explicitly set `rfc2136`. The signer checks the selected provider with local lego help before invoking ACME.
+This guide targets v1.5.1. The image defaults to `DNS_PROVIDER=dnsupdate` for bundled lego 5.4.1. Update older environment files or ConfigMaps that explicitly set `rfc2136`. The signer checks the selected provider with local lego help before invoking ACME.
 
 The program is a batch workflow: start, inspect certificates, renew those that are
 due, verify, then exit. Use a **CronJob**, not a continuously running Deployment.
@@ -40,7 +40,7 @@ Keep `OUTPUT_DIR=/data`. Preserve TLS verification and configure CSR subject fie
 as needed (see [configuration](.env.example)).
 
 ```sh
-docker pull ghcr.io/kiefer413/vcf-cert-renewer:1.5.0
+docker pull ghcr.io/kiefer413/vcf-cert-renewer:1.5.1
 docker volume create vcf-renewer-data
 ```
 
@@ -75,7 +75,7 @@ docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
   --env-file ./container.env \
   --mount type=bind,src="$(pwd)/secrets",dst=/run/secrets,readonly \
   --mount type=volume,src=vcf-renewer-data,dst=/data \
-  ghcr.io/kiefer413/vcf-cert-renewer:1.5.0 plan --all
+  ghcr.io/kiefer413/vcf-cert-renewer:1.5.1 plan --all
 ```
 
 Review target scope before making changes. Set `ACME_MODE=production` and configure
@@ -85,7 +85,7 @@ checking discovery and health. Add only approved roles before running
 permissions in an isolated environment before enabling unattended renewal.
 
 For an offline installation check, use `docker run --rm --network none
- ghcr.io/kiefer413/vcf-cert-renewer:1.5.0 --version` as one command.
+ ghcr.io/kiefer413/vcf-cert-renewer:1.5.1 --version` as one command.
 
 ### Podman and Compose
 
@@ -354,7 +354,7 @@ Do not use `kubectl delete -f deploy/kubernetes/` for routine uninstall.
 For Docker/Podman/Compose, keep the data volume and secret files; avoid
 `docker compose down -v` unless deliberately discarding account state.
 
-## v1.5.0 Compose scheduler
+## Compose scheduler
 
 Copy `examples/compose.yaml` and `examples/container.env.example` to a protected
 deployment directory. Rename the latter to `container.env`, configure exact
@@ -415,3 +415,9 @@ and `docker compose exec renewer vcf-cert-renewer status --all --json`.
 If stuck in an unresolved replacement, preserve the journal and reconcile the
 saved VMware task. Avoid concurrent schedulers and avoid `docker compose down -v`.
 Confirmed live validation and Fleet limitations are in the [release notes](docs/releases/v1.5.0.md).
+
+Software update checks use the public GitHub HTTPS API. They retain their cache in
+`/data` and never pull a new image. Use `docker compose exec renewer vcf-cert-renewer
+check-update --json`. To upgrade, back up the volume, select an explicit version tag,
+pull it and recreate the service with the existing volume and mounts.
+See [update settings and troubleshooting](docs/automation-monitoring.md#software-update-notifications).

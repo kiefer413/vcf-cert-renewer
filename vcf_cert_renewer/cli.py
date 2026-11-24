@@ -31,7 +31,7 @@ from .sddc_client import SddcApiClient
 from .sddc_install import InstallError, install_existing
 from .scoped_renewal import TARGETS, renew_scoped
 from .task_guard import Stop
-from . import monitoring
+from . import monitoring, updates
 from .signer import reuse_signed_csr, sign_csr
 from .importer import import_certificate_chain
 from .plan import build_domain_plan, build_plan
@@ -123,6 +123,8 @@ def _parser() -> argparse.ArgumentParser:
     health = sub.add_parser("status", help="read persisted scheduler and certificate health")
     health.add_argument("--all", action="store_true")
     health.add_argument("--json", action="store_true")
+    update = sub.add_parser("check-update", help="check for a published software release")
+    update.add_argument("--json", action="store_true")
     monitor = sub.add_parser("watchdog", help="check scheduler health independently")
     monitor.add_argument("--systemd", action="store_true")
 
@@ -362,12 +364,39 @@ def _write_csr(output: Path, hostname: str, csr: str) -> Path:
     return destination
 
 
+
+def _print_software_update(state):
+    print("Software version", state["status"])
+    print("Installed", state["installed_version"], "| Latest", state["latest_version"] or "unknown")
+    print("Update available", "yes" if state["update_available"] else "no")
+    print("Release channel", state["release_channel"])
+    print("Last successful check", state["last_successful_check"] or "never")
+    if state["release_url"]:
+        print("Release URL", state["release_url"])
+    if state["cache_may_be_stale"]:
+        print("Cached release information may be stale.")
+    if state["error_code"]:
+        print("Version check error", state["error_code"])
+    print("Automatic installation disabled")
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         settings = Settings.load(
             config_path=args.config, secrets_path=args.secrets_file,
             overrides={"RENEW_BEFORE_DAYS": args.renew_before_days})
+        if args.command == "check-update":
+            events = monitoring.Events(os.environ, stream=sys.stderr if args.json else None)
+            try:
+                checked = updates.advisory(settings.output_dir, events, os.environ, force=True)
+                state = updates.status(settings.output_dir, os.environ)
+                if args.json:
+                    print(json.dumps({"software_update": state}, sort_keys=True))
+                else:
+                    _print_software_update(state)
+                return int(not checked or state["check_status"] == "FAILED")
+            finally:
+                events.close()
         if args.command in {"scheduled", "scheduler", "status", "watchdog"}:
             if args.command == "status":
                 state = monitoring.status(settings, os.environ)
@@ -380,13 +409,16 @@ def main(argv: list[str] | None = None) -> int:
                         print(role, target["target"], target["status"], target.get("expires", "unknown"))
                     for issue in state["issues"]:
                         print(issue)
+                    _print_software_update(state["software_update"])
                 return int(not state["healthy"])
             events = monitoring.Events(os.environ)
             try:
                 if args.command == "watchdog":
                     return monitoring.watchdog(settings, events, os.environ, timer=args.systemd)
                 if args.command == "scheduled":
-                    return monitoring.scheduled(settings, events, os.environ)
+                    rc = monitoring.scheduled(settings, events, os.environ)
+                    updates.advisory(settings.output_dir, events, os.environ)
+                    return rc
                 return monitoring.run_loop(settings, events, os.environ)
             except Exception as exc:
                 events.emit("VCF-3300", error_code=type(exc).__name__)

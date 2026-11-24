@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.5.1
+
+- Add advisory GitHub release checks, deduplicated structured events, cached status and `check-update`.
+- Update pinned CI and publishing actions to verified Node.js 24 releases.
+
 ## v1.5.0
 
 - Add per-target unattended renewal policy, replacement checkpoints and health state.
