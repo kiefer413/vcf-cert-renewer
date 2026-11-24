@@ -1,6 +1,6 @@
 services:
   renewer:
-    image: ghcr.io/kiefer413/vcf-cert-renewer:1.5.0
+    image: ghcr.io/kiefer413/vcf-cert-renewer:1.5.1
     env_file: ./container.env
     command: ["scheduler"]
     restart: unless-stopped

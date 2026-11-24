@@ -15,7 +15,7 @@ import subprocess
 from threading import Event, Thread
 from uuid import uuid4
 
-from . import __version__
+from . import __version__, updates
 from .config import ConfigurationError
 from .renewer import RenewalExecutionError
 from .scoped_renewal import ROLES, renew_scoped
@@ -27,7 +27,8 @@ CATALOG = {
     "VCF-2000": "WARNING", "VCF-2100": "WARNING", "VCF-2200": "WARNING",
     "VCF-3000": "ERROR", "VCF-3100": "ERROR", "VCF-3200": "ERROR",
     "VCF-3300": "ERROR", "VCF-4000": "CRITICAL", "VCF-4100": "CRITICAL",
-    "VCF-5000": "INFO",
+    "VCF-5000": "INFO", "VCF-6000": "INFO", "VCF-6010": "INFO",
+    "VCF-6020": "WARNING", "VCF-6030": "INFO",
 }
 SEVERITY = {"INFO": 6, "WARNING": 4, "ERROR": 3, "CRITICAL": 2}
 HOST = re.compile(r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
@@ -126,8 +127,9 @@ class Syslog:
 
 class Events:
     """Emit only fields produced by this module, never raw exceptions or responses."""
-    def __init__(self, env):
+    def __init__(self, env, *, stream=None):
         self.handler = None
+        self.stream = stream
         filename = env.get("VCF_LOG_FILE")
         if filename:
             path = Path(filename)
@@ -151,7 +153,7 @@ class Events:
                      application_version=__version__)
         line = json.dumps(event, sort_keys=True, separators=(",", ":"))
         if self.handler is None:
-            print(line, flush=True)
+            print(line, file=self.stream, flush=True)
         else:
             self.handler.handle(logging.LogRecord("vcf-cert-renewer", logging.INFO, "", 0, line, (), None))
         if self.syslog is not None:
@@ -376,7 +378,8 @@ def status(settings, environ, timer=False):
             issues.append(kind + "_" + record["status"])
     if state.get("failures") and not any("FAILED" in item or "UNRESOLVED" in item for item in issues):
         issues.append("SCHEDULER_FAILED")
-    return {**state, "healthy": not issues, "issues": issues}
+    return {**state, "healthy": not issues, "issues": issues,
+            "software_update": updates.status(settings.output_dir, environ)}
 
 
 def _watchdog_state(data):
@@ -412,6 +415,8 @@ def run_loop(settings, events, environ):
     while not stopped.is_set():
         try:
             scheduled(settings, events, environ, stopped)
+            if not stopped.is_set():
+                updates.advisory(settings.output_dir, events, environ)
         except Exception as exc:
             events.emit("VCF-3300", error_code=type(exc).__name__)
         stopped.wait(period)

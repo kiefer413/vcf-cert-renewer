@@ -5,7 +5,7 @@ import sys
 import time
 from uuid import uuid4
 
-IMAGE = sys.argv[1] if len(sys.argv) > 1 else "vcf-cert-renewer:1.5.0"
+IMAGE = sys.argv[1] if len(sys.argv) > 1 else "vcf-cert-renewer:1.5.1"
 TARGET = "nsx.example.com"
 CERT_ID = "43b7b14d-f816-48dc-a558-11504f851eae"
 FIXTURE = r"""
@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
-from vcf_cert_renewer import cli, scoped_renewal as scoped
+from vcf_cert_renewer import cli, scoped_renewal as scoped, updates
 from vcf_cert_renewer.sddc_install import _locked_state, _write
 
 os.umask(0o077)
@@ -46,6 +46,8 @@ else:
     state = json.loads((root / ".renew-nsx/state.json").read_text())
     assert state["certificate_id"] == cert_id and state["state"] == "SUBMITTING"
     assert (root / ".scheduler/state.json").is_file()
+    update_state = json.loads((root / ".software-update/state.json").read_text())
+    assert update_state["last_notified_version"] == "1.5.2"
 
 def discovery(name):
     assert name == target
@@ -57,7 +59,12 @@ client = SimpleNamespace(discover=discovery)
 live = SimpleNamespace(not_valid_after_utc=datetime.now(timezone.utc) + timedelta(days=90))
 def reject_mutation(*args, **kwargs):
     raise AssertionError("Unexpected mutation or issuance attempt")
-with patch.object(scoped, "_live", return_value=live), \
+def mock_latest(*args):
+    assert mode == "fresh", "Persisted interval should suppress the second request"
+    return {"latest_version": "1.5.2", "release_url": updates.WEB + "v1.5.2",
+            "published_at": "2026-01-01T00:00:00+00:00"}, '"fixture"'
+with patch.object(updates, "_bounded_fetch", side_effect=mock_latest), \
+     patch.object(scoped, "_live", return_value=live), \
      patch.object(scoped, "_fingerprint", return_value=fp), \
      patch.object(scoped, "_dns_sans", return_value=[target]), \
      patch.object(scoped, "NsxApiClient", return_value=client), \
@@ -97,7 +104,7 @@ def start(name, volume, mode):
 
 def events(name):
     records = [json.loads(line) for line in docker("logs", name).splitlines() if line.startswith("{")]
-    assert any(r["event_id"] == "VCF-1000" and r["application_version"] == "1.5.0" for r in records)
+    assert any(r["event_id"] == "VCF-1000" and r["application_version"] == "1.5.1" for r in records)
     return records
 
 
@@ -115,10 +122,18 @@ def main():
     try:
         start(names[0], volume, "fresh")
         check_health(names[0], "unhealthy")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if any(r["event_id"] == "VCF-6000" for r in events(names[0])):
+                break
+            time.sleep(0.25)
+        else:
+            raise AssertionError("Update notification missing")
         assert any(r["event_id"] == "VCF-2100" for r in events(names[0]))
         stop(names[0])
         start(names[1], volume, "resume")
         check_health(names[1], "healthy")
+        assert not any(r["event_id"] in {"VCF-6000", "VCF-6020"} for r in events(names[1]))
         assert any(r["event_id"] == "VCF-1200" and r["certificate_id"] == CERT_ID
                    for r in events(names[1]))
         state = json.loads(docker("exec", names[1], "cat", "/data/.renew-nsx/state.json"))

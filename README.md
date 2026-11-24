@@ -2,11 +2,11 @@
 
 ## Docker / Podman and Kubernetes
 
-Use `ghcr.io/kiefer413/vcf-cert-renewer:1.4.0` (amd64/arm64). Python, dependencies
+Use `ghcr.io/kiefer413/vcf-cert-renewer:1.5.1` (amd64/arm64). Python, dependencies
 and lego are included. See the **[container deployment guide](CONTAINER_DEPLOYMENT.md)**
 for Docker/Podman/Compose installation and the official
 [Kubernetes CronJob](deploy/kubernetes/cronjob.yaml), including plan-first setup
-and mounted secrets. Until v1.4.0 is published, use the available `:1.3.1` image.
+and mounted secrets.
 
 CA-neutral ACME v2 TLS certificate automation for VMware Cloud Foundation (VCF) 9.x.
 
@@ -314,3 +314,6 @@ Automation are implemented and mock-tested through Fleet. Production verified
 authenticated discovery and trusted TLS for those two targets. Their live
 issuance and replacement remain unverified because their certificates were
 outside the renewal window.
+
+The scheduler checks for software updates daily. Use `check-update` for an immediate
+check or `status --all` for cached results. See [software update notifications](docs/automation-monitoring.md#software-update-notifications).
